@@ -173,8 +173,11 @@ def merge(state, got):
 
     for vid, v in list(videos.items()):
         start = parse_time(v["start_scheduled"] or v["available_at"])
-        # 他事務所の枠の予定は /live で確かめられないので、時刻を過ぎて残っていたら捨てる
-        if v["status"] == "upcoming" and start and start < now - timedelta(hours=STALE_UPCOMING_HOURS):
+        # 他事務所の枠の予定は /live で確かめられないので、時刻を過ぎて残っていたら捨てる。
+        # collabs から来る、ずっと先の待機所（1年以上先の枠など）も載せない
+        if v["status"] == "upcoming" and start and (
+                start < now - timedelta(hours=STALE_UPCOMING_HOURS)
+                or start > now + timedelta(hours=UPCOMING_HOURS)):
             del videos[vid]
         elif start and start < now - timedelta(days=KEEP_DAYS):
             del videos[vid]

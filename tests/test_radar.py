@@ -93,6 +93,12 @@ class RadarTest(unittest.TestCase):
         sho = json.loads(self.read("radar", f"{SHO}.json"))
         self.assertEqual(sho["upcoming"], [])
 
+    def test_far_future_waiting_room_is_dropped(self):
+        self.run_batch(FakeHolodex(collabs=[video("wait", "UCother_org", [SHO], status="upcoming", hours=24 * 200),
+                                            video("soon", "UCother_org", [SHO], status="upcoming", hours=24)]))
+        sho = json.loads(self.read("radar", f"{SHO}.json"))
+        self.assertEqual([a["id"] for a in sho["upcoming"]], ["soon"])
+
     def test_failure_keeps_previous_outputs(self):
         self.run_batch(FakeHolodex(past=[video("p1", KAGETSU, [SHO])]))
         before = self.read("radar", f"{SHO}.json"), self.read("state.json")
