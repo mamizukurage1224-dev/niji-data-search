@@ -10,9 +10,9 @@
   前回の状態：OUT_DIR/state.json（無ければ初回として過去 BACKFILL_DAYS 日分を取る）
 出力（OUT_DIR、既定は ./out）
   radar/index.json          … 最終更新時刻と、ライバーごとの件数・次の出演
-  radar/{channel_id}.json   … ライバー別の出演一覧（これから／過去）
-  ics/{channel_id}.ics      … ライバー別のカレンダー（これから＋直近の過去）
+  radar/{channel_id}.json   … ライバー別の他枠出演と自枠（それぞれ これから／過去）
   state.json                … 次回の差分取得に使う状態
+  （カレンダー（ICS）の出力は 2026-09-25 にやめた。以前の ics/ が残っていれば消す）
 
 取得に失敗したら何も書き換えずに終了コード1で終わる（前回のデータを出し続ける）。
 データは Holodex API から取得している（Powered by Holodex。ライセンスと免責は batch/holodex.py を参照）。
@@ -21,6 +21,8 @@ import csv
 import io
 import json
 import os
+import re
+import shutil
 import sys
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -39,11 +41,20 @@ PAST_MAX_PAGES = 40       # 1回の過去分取得のページ上限（50件×40
 COLLAB_PER_RUN = 8        # 他事務所の枠を補うライバー数（1回あたり、順番に回す）
 KEEP_DAYS = 365           # 状態に残す日数
 PAST_SHOW_DAYS = 180      # JSONに載せる過去の日数
-ICS_PAST_DAYS = 14        # ICSに載せる過去の日数
 STALE_UPCOMING_HOURS = 12 # 予定時刻を過ぎても配信にならない予定を捨てるまでの時間
-DEFAULT_MINUTES = 60      # 長さが分からない配信のICS上の長さ
+ALWAYS_ON_HOURS = 24      # 開始からこの時間を過ぎても配信中のものは常時配信とみなして捨てる
 
 EXCLUDED_TOPICS = {"membersonly"}   # メン限は一覧の対象外（二次創作ガイドライン 第1条4項）
+
+# 画面に出すブランチと、画面での分け方（jp：にじさんじ、en：NIJISANJI EN）。
+# 旧KR・旧ID出身の現役ライバーはいまは にじさんじ所属なので jp に入れる。VirtuaReal は YouTube の配信がほぼ無いので出さない
+BRANCH_GROUPS = {"本家": "jp", "旧KR": "jp", "旧ID": "jp", "EN": "en"}
+
+# 配信・動画・ショートの見分け（Holodex には区別が無いので推定。仮の規則）
+SHORT_SECONDS = 120          # これ以下の長さの投稿はショートとみなす（1〜2分の告知や切り抜きも入る）
+SHORT_TAGGED_SECONDS = 180   # 題名にハッシュタグ（#）があれば、ここまでをショートとみなす（YouTube のショートは3分まで）
+LEGACY_LIVE_SECONDS = 600    # 開始時刻を取っていない古いデータは、これより長ければ配信とみなす
+STATE_SCHEMA = 2             # 2：過去分も live_info（開始時刻）付きで取る。古い状態なら過去 BACKFILL_DAYS 日を取り直す
 
 
 def now_utc():
@@ -78,7 +89,7 @@ def build_index(master):
     targets = {
         r["channel_id"]: (r.get("display_name") or r.get("name_holodex") or r["channel_id"])
         for r in master
-        if r.get("branch") == "本家" and r.get("channel_type") == "liver" and r.get("inactive") != "TRUE"
+        if r.get("branch") in BRANCH_GROUPS and r.get("channel_type") == "liver" and r.get("inactive") != "TRUE"
     }
     main_by_name = {r["display_name"]: r["channel_id"]
                     for r in master if r.get("channel_type") == "liver" and r.get("display_name")}
@@ -92,8 +103,13 @@ def build_index(master):
 
 
 def build_meta(master):
-    """画面の検索と五十音順に使う読み。"""
-    return {r["channel_id"]: {"kana": r.get("kana") or "", "alias": r.get("kana_alias") or ""} for r in master}
+    """画面の検索と並び順に使う読み・グループ（jp／en）と、画面の色（ライバーカラー。#RRGGBB でなければ空）。"""
+    def color(text):
+        text = (text or "").strip().upper()
+        return text if re.fullmatch(r"#[0-9A-F]{6}", text) else ""
+    return {r["channel_id"]: {"kana": r.get("kana") or "", "alias": r.get("kana_alias") or "",
+                              "color": color(r.get("color")), "group": BRANCH_GROUPS.get(r.get("branch"), "")}
+            for r in master}
 
 
 # ---------- 取得 ----------
@@ -115,18 +131,21 @@ def slim(v, src):
         "duration": v.get("duration") or 0,
         "mentions": [m["id"] for m in (v.get("mentions") or []) if m.get("id")],
         "src": src,
+        "has_live_info": True,   # 開始時刻（live_info）付きで取った。無い古いデータは kind_of で長さから推定する
     }
 
 
 def fetch(state, targets):
     """Holodex から取る。1つでも失敗したら HolodexError をそのまま上げる。"""
     now = now_utc()
-    common = {"type": "stream", "include": "mentions"}
+    # live_info：過去の動画にも開始時刻を付けてもらい、配信と投稿動画を見分ける（/live には最初から付く）
+    common = {"type": "stream", "include": "mentions,live_info"}
 
     print("1/3 これからの配信を取得中…", flush=True)
     live = holodex.get_all("/live", {**common, "org": ORG, "max_upcoming_hours": UPCOMING_HOURS}, max_pages=10)
 
-    last = parse_time(state.get("last_past_fetch"))
+    # 状態が古い形式なら、過去 BACKFILL_DAYS 日を開始時刻付きで取り直す（上限で止まったら次の回に続きから）
+    last = parse_time(state.get("last_past_fetch")) if state.get("schema", 1) >= STATE_SCHEMA else None
     since = (last - timedelta(hours=PAST_OVERLAP_HOURS)) if last else (now - timedelta(days=BACKFILL_DAYS))
     print(f"2/3 {iso(since)[:16]} 以降の過去の配信を取得中（最大{PAST_MAX_PAGES * holodex.PAGE}本）…", flush=True)
     past = holodex.get_all("/videos", {**common, "org": ORG, "status": "past", "from": iso(since),
@@ -140,7 +159,7 @@ def fetch(state, targets):
     collabs = []
     for cid in turn:
         collabs.extend(holodex.as_list(holodex.get(f"/channels/{cid}/collabs",
-                                                   {"include": "mentions", "limit": 25})))
+                                                   {"include": "mentions,live_info", "limit": 25})))
 
     # 上限で打ち切ったときは、取れたところまでを記録して次の回に続きを取る
     truncated = len(past) >= PAST_MAX_PAGES * holodex.PAGE
@@ -178,11 +197,16 @@ def merge(state, got):
 
     for vid, v in list(videos.items()):
         start = parse_time(v["start_scheduled"] or v["available_at"])
+        started = parse_time(v["start_actual"]) or start
         # 他事務所の枠の予定は /live で確かめられないので、時刻を過ぎて残っていたら捨てる。
         # collabs から来る、ずっと先の待機所（1年以上先の枠など）も載せない
         if v["status"] == "upcoming" and start and (
                 start < now - timedelta(hours=STALE_UPCOMING_HOURS)
                 or start > now + timedelta(hours=UPCOMING_HOURS)):
+            del videos[vid]
+        # 常時配信（ユニットの「〇〇 Station」など）はずっと /live に居て消えないので、
+        # 開始から時間がたっても配信中のものは捨てる（毎回 /live から入り直し、ここでまた消える）
+        elif v["status"] == "live" and started and started < now - timedelta(hours=ALWAYS_ON_HOURS):
             del videos[vid]
         elif start and start < now - timedelta(days=KEEP_DAYS):
             del videos[vid]
@@ -192,10 +216,41 @@ def merge(state, got):
         "last_past_fetch": got["past_until"],
         "updated_at": got["fetched_at"],
         "collab_cursor": got["collab_cursor"],
+        "schema": STATE_SCHEMA,
     }
 
 
 # ---------- 出力 ----------
+
+def kind_of(v):
+    """配信（live）・動画（video）・ショート（short）を推定する。
+    開始時刻があるものは配信（プレミア公開も開始時刻を持つので、ここでは配信に入る）。"""
+    duration = v.get("duration") or 0
+    if v["status"] in ("upcoming", "live") or v.get("start_actual"):
+        return "live"
+    if 0 < duration <= SHORT_SECONDS or (
+            duration <= SHORT_TAGGED_SECONDS and re.search(r"[#＃]\S", v.get("title") or "")):
+        return "short"
+    if not v.get("has_live_info") and duration > LEGACY_LIVE_SECONDS:
+        return "live"
+    return "video"
+
+
+def entry(v, owner, names):
+    """画面に載せる1件。owner_id は枠の主（サブチャンネルならメインのチャンネル）。"""
+    return {
+        "id": v["id"],
+        "title": v["title"],
+        "host_id": v["channel_id"],
+        "owner_id": owner.get(v["channel_id"], v["channel_id"]),
+        "host_name": names.get(v["channel_id"]) or v["channel_name"],
+        "status": v["status"],
+        "kind": kind_of(v),
+        "start": v["start_actual"] or v["start_scheduled"] or v["available_at"],
+        "duration": v["duration"],
+        "url": f"https://www.youtube.com/watch?v={v['id']}",
+    }
+
 
 def appearances(videos, targets, owner, names):
     """ライバーごとの他枠出演。自分（とサブチャンネル）の枠は除く。"""
@@ -206,71 +261,29 @@ def appearances(videos, targets, owner, names):
         host = owner.get(v["channel_id"], v["channel_id"])
         for cid in v["mentions"]:
             if cid in result and cid != host:
-                result[cid].append({
-                    "id": v["id"],
-                    "title": v["title"],
-                    "host_id": v["channel_id"],
-                    "host_name": names.get(v["channel_id"]) or v["channel_name"],
-                    "status": v["status"],
-                    "start": v["start_actual"] or v["start_scheduled"] or v["available_at"],
-                    "duration": v["duration"],
-                    "url": f"https://www.youtube.com/watch?v={v['id']}",
-                })
+                result[cid].append(entry(v, owner, names))
     return result
 
 
-def ics_escape(text):
-    return (text.replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,")
-            .replace("\r\n", "\\n").replace("\n", "\\n"))
-
-
-def ics_fold(line):
-    """75オクテットごとに折り返す（RFC 5545）。マルチバイト文字の途中では切らない。"""
-    out, cur, size = [], "", 0
-    for ch in line:
-        n = len(ch.encode("utf-8"))
-        limit = 75 if not out else 74   # 2行目以降は先頭の空白1文字分を引く
-        if size + n > limit:
-            out.append(cur)
-            cur, size = "", 0
-        cur += ch
-        size += n
-    out.append(cur)
-    return "\r\n ".join(out)
-
-
-def to_ics(name, items, generated):
-    stamp = generated.strftime("%Y%m%dT%H%M%SZ")
-    lines = [
-        "BEGIN:VCALENDAR",
-        "VERSION:2.0",
-        "PRODID:-//niji-oshikatsu-tools//radar//JA",
-        "CALSCALE:GREGORIAN",
-        "METHOD:PUBLISH",
-        f"X-WR-CALNAME:{ics_escape(name)} 他枠出演（非公式）",
-        "X-WR-TIMEZONE:Asia/Tokyo",
-    ]
-    for a in items:
-        start = parse_time(a["start"])
-        if not start:
+def own_streams(videos, targets, owner, names):
+    """ライバーごとの自枠（本人とサブチャンネルの枠）。"""
+    result = {cid: [] for cid in targets}
+    for v in videos.values():
+        if v["topic_id"] in EXCLUDED_TOPICS or v["status"] == "missing":
             continue
-        minutes = round(a["duration"] / 60) if a["duration"] else DEFAULT_MINUTES
-        end = start + timedelta(minutes=max(minutes, 1))
-        lines += [
-            "BEGIN:VEVENT",
-            f"UID:{a['id']}@niji-oshikatsu-tools",
-            f"DTSTAMP:{stamp}",
-            f"DTSTART:{start.strftime('%Y%m%dT%H%M%SZ')}",
-            f"DTEND:{end.strftime('%Y%m%dT%H%M%SZ')}",
-            f"SUMMARY:{ics_escape('[他枠] ' + a['host_name'] + '：' + a['title'])}",
-            f"URL:{a['url']}",
-            "DESCRIPTION:" + ics_escape(
-                f"{a['url']}\n予定は変わることがあります。最新はサイトで確認してください。\n"
-                "非公式ファンツール / Powered by Holodex"),
-            "END:VEVENT",
-        ]
-    lines.append("END:VCALENDAR")
-    return "\r\n".join(ics_fold(line) for line in lines) + "\r\n"
+        host = owner.get(v["channel_id"], v["channel_id"])
+        if host in result:
+            result[host].append(entry(v, owner, names))
+    return result
+
+
+def split(items, show_from):
+    """これから（配信中を含む、古い順）と、show_from 以降の過去（新しい順）に分ける。"""
+    items = sorted(items, key=lambda a: a["start"] or "")
+    upcoming = [a for a in items if a["status"] in ("upcoming", "live")]
+    past = [a for a in items if a["status"] == "past" and a["start"] and parse_time(a["start"]) >= show_from]
+    past.reverse()
+    return upcoming, past
 
 
 def write_json(path, data):
@@ -281,40 +294,33 @@ def write_json(path, data):
     os.replace(tmp, path)
 
 
-def write_text(path, text):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8", newline="") as f:
-        f.write(text)
-    os.replace(tmp, path)
-
-
 def write_outputs(state, targets, owner, names, meta=None):
     meta = meta or {}
     generated = parse_time(state["updated_at"])
     by_liver = appearances(state["videos"], targets, owner, names)
+    own_by_liver = own_streams(state["videos"], targets, owner, names)
     show_from = generated - timedelta(days=PAST_SHOW_DAYS)
-    ics_from = generated - timedelta(days=ICS_PAST_DAYS)
     index = []
     for cid, items in by_liver.items():
-        items.sort(key=lambda a: a["start"] or "")
-        upcoming = [a for a in items if a["status"] in ("upcoming", "live")]
-        past = [a for a in items if a["status"] == "past" and a["start"] and parse_time(a["start"]) >= show_from]
-        past.reverse()
+        upcoming, past = split(items, show_from)
+        own_upcoming, own_past = split(own_by_liver[cid], show_from)
+        # upcoming・past は他枠出演、own_upcoming・own_past は自枠
         write_json(os.path.join(OUT_DIR, "radar", f"{cid}.json"), {
             "channel_id": cid, "name": targets[cid], "updated_at": state["updated_at"],
-            "upcoming": upcoming, "past": past,
+            "upcoming": upcoming, "past": past, "own_upcoming": own_upcoming, "own_past": own_past,
         })
-        in_ics = upcoming + [a for a in past if parse_time(a["start"]) >= ics_from]
-        write_text(os.path.join(OUT_DIR, "ics", f"{cid}.ics"), to_ics(targets[cid], in_ics, generated))
-        index.append({"channel_id": cid, "name": targets[cid], **meta.get(cid, {"kana": "", "alias": ""}),
-                      "upcoming": len(upcoming),
-                      "past": len(past), "next": upcoming[0]["start"] if upcoming else None})
+        index.append({"channel_id": cid, "name": targets[cid],
+                      **meta.get(cid, {"kana": "", "alias": "", "color": "", "group": ""}),
+                      "upcoming": len(upcoming), "past": len(past),
+                      "own_upcoming": len(own_upcoming), "own_past": len(own_past),
+                      "next": upcoming[0]["start"] if upcoming else None})
     write_json(os.path.join(OUT_DIR, "radar", "index.json"), {
         "updated_at": state["updated_at"],
         "source": "Holodex API (https://holodex.net/)",
         "livers": index,
     })
+    # カレンダー（ICS）の出力はやめた。前回までの出力（gh-pages から戻したもの）が残っていれば消す
+    shutil.rmtree(os.path.join(OUT_DIR, "ics"), ignore_errors=True)
 
 
 # ---------- 実行 ----------

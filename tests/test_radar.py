@@ -12,11 +12,15 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "batch"))
 import holodex  # noqa: E402
 import radar    # noqa: E402
 
-SHO, KAGETSU, HOST_SUB, EN = "UCsho", "UCkagetsu", "UCsho_sub", "UCen"
+SHO, KAGETSU, HOST_SUB, EN, EN_LIVER, EX_KR, CN = "UCsho", "UCkagetsu", "UCsho_sub", "UCen", "UCvox", "UChayun", "UCcn"
 MASTER = [
+    {"channel_id": EN_LIVER, "display_name": "Vox Akuma", "branch": "EN", "channel_type": "liver", "inactive": "FALSE"},
+    {"channel_id": EX_KR, "display_name": "ハ ユン", "branch": "旧KR", "channel_type": "liver", "inactive": "FALSE"},
+    {"channel_id": CN, "display_name": "VR liver", "branch": "CN", "channel_type": "liver", "inactive": "FALSE"},
     {"channel_id": SHO, "display_name": "星導ショウ", "kana": "ほしるべしょう", "kana_alias": "しょう",
-     "branch": "本家", "channel_type": "liver", "inactive": "FALSE"},
-    {"channel_id": KAGETSU, "display_name": "叢雲カゲツ", "branch": "本家", "channel_type": "liver", "inactive": "FALSE"},
+     "branch": "本家", "channel_type": "liver", "inactive": "FALSE", "color": "#a58cdc"},
+    {"channel_id": KAGETSU, "display_name": "叢雲カゲツ", "branch": "本家", "channel_type": "liver", "inactive": "FALSE",
+     "color": "red; background: url(x)"},
     {"channel_id": HOST_SUB, "display_name": "星導ショウ", "branch": "本家", "channel_type": "sub", "inactive": "FALSE"},
     {"channel_id": EN, "display_name": "", "name_holodex": "EN liver", "branch": "EN", "channel_type": "", "inactive": "FALSE"},
 ]
@@ -83,11 +87,73 @@ class RadarTest(unittest.TestCase):
         self.assertEqual([a["id"] for a in sho["past"]], ["p1", "c1"])
         kagetsu = json.loads(self.read("radar", f"{KAGETSU}.json"))
         self.assertEqual([a["id"] for a in kagetsu["past"]], ["p2"])   # ショウのサブ枠はカゲツには他枠
-        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "radar", f"{EN}.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "radar", f"{EN}.json")))   # 分類の無い EN チャンネル
         index = json.loads(self.read("radar", "index.json"))
         self.assertTrue(index["updated_at"])
-        self.assertEqual(sorted(x["channel_id"] for x in index["livers"]), [KAGETSU, SHO])
+        # 本家・旧KR（いまは にじさんじ）・EN のライバーを載せ、VirtuaReal は載せない
+        groups = {x["channel_id"]: x["group"] for x in index["livers"]}
+        self.assertEqual(groups, {KAGETSU: "jp", SHO: "jp", EX_KR: "jp", EN_LIVER: "en"})
         self.assertEqual(next(x for x in index["livers"] if x["channel_id"] == SHO)["kana"], "ほしるべしょう")
+        colors = {x["channel_id"]: x["color"] for x in index["livers"]}
+        self.assertEqual((colors[SHO], colors[KAGETSU]), ("#A58CDC", ""))   # #RRGGBB 以外は画面に渡さない
+
+    def test_own_streams(self):
+        fake = FakeHolodex(
+            live=[video("own_up", SHO, [], status="upcoming", hours=3)],
+            past=[
+                video("own1", SHO, [KAGETSU], hours=-30),                # 本人の枠 → ショウの自枠・カゲツの他枠
+                video("own_sub", HOST_SUB, [], hours=-20),               # サブチャンネルの枠 → ショウの自枠
+                video("own_mem", SHO, [], topic="membersonly"),          # メン限 → 載らない
+                video("guest1", KAGETSU, [SHO], hours=-10),              # 他枠 → 自枠には載らない
+            ])
+        self.run_batch(fake)
+        sho = json.loads(self.read("radar", f"{SHO}.json"))
+        self.assertEqual([a["id"] for a in sho["own_upcoming"]], ["own_up"])
+        self.assertEqual([a["id"] for a in sho["own_past"]], ["own_sub", "own1"])   # 新しい順
+        self.assertEqual({a["owner_id"] for a in sho["own_past"]}, {SHO})
+        self.assertEqual([a["id"] for a in sho["past"]], ["guest1"])
+        kagetsu = json.loads(self.read("radar", f"{KAGETSU}.json"))
+        self.assertEqual([a["id"] for a in kagetsu["past"]], ["own1"])
+        self.assertEqual(kagetsu["past"][0]["owner_id"], SHO)
+        index = json.loads(self.read("radar", "index.json"))
+        sho_index = next(x for x in index["livers"] if x["channel_id"] == SHO)
+        self.assertEqual((sho_index["upcoming"], sho_index["own_upcoming"], sho_index["own_past"]), (0, 1, 2))
+
+    def test_kind(self):
+        def upload(vid, duration, title=None):
+            v = dict(video(vid, SHO, [], duration=duration), start_scheduled=None, start_actual=None)
+            return dict(v, title=title) if title else v
+        self.run_batch(FakeHolodex(
+            live=[video("up", SHO, [], status="upcoming", hours=3)],
+            past=[video("stream", SHO, [], duration=3600),                   # 開始時刻あり → 配信
+                  upload("mv", 240),                                         # 開始時刻なし → 動画
+                  upload("s100", 100),                                       # 2分以下 → ショート
+                  upload("s150", 150, "3分近いショート #にじさんじ"),            # ハッシュタグ付きで3分以下 → ショート
+                  upload("v150", 150)]))                                     # ハッシュタグなしで2分超え → 動画
+        sho = json.loads(self.read("radar", f"{SHO}.json"))
+        kinds = {a["id"]: a["kind"] for a in sho["own_upcoming"] + sho["own_past"]}
+        self.assertEqual(kinds, {"up": "live", "stream": "live", "mv": "video", "s100": "short",
+                                 "s150": "short", "v150": "video"})
+        # 開始時刻を取っていない古いデータは、長さで配信か動画かを推定する
+        legacy = {"status": "past", "start_actual": None, "title": "", "duration": 3600}
+        self.assertEqual(radar.kind_of(legacy), "live")
+        self.assertEqual(radar.kind_of(dict(legacy, duration=300)), "video")
+
+    def test_old_state_is_refetched_with_live_info(self):
+        self.run_batch(FakeHolodex())
+        state = json.loads(self.read("state.json"))
+        self.assertEqual(state["schema"], radar.STATE_SCHEMA)
+        state.pop("schema")   # 開始時刻を取る前の形式に戻す
+        with open(os.path.join(self.tmp.name, "state.json"), "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        calls = []
+        fake = FakeHolodex()
+        with mock.patch.object(holodex, "get", lambda p, params=None, retries=3: calls.append((p, params)) or fake.get(p, params)):
+            radar.main()
+        params = next(params for p, params in calls if p == "/videos")
+        self.assertIn("live_info", params["include"])
+        backfill_from = radar.parse_time(params["from"])
+        self.assertLess(backfill_from, radar.now_utc() - timedelta(days=radar.BACKFILL_DAYS - 1))   # 差分ではなく取り直し
 
     def test_cancelled_upcoming_is_removed(self):
         self.run_batch(FakeHolodex(live=[video("up1", KAGETSU, [SHO], status="upcoming", hours=5)]))
@@ -100,6 +166,22 @@ class RadarTest(unittest.TestCase):
                                             video("soon", "UCother_org", [SHO], status="upcoming", hours=24)]))
         sho = json.loads(self.read("radar", f"{SHO}.json"))
         self.assertEqual([a["id"] for a in sho["upcoming"]], ["soon"])
+
+    def test_always_on_live_is_dropped(self):
+        onair = video("onair", KAGETSU, [SHO], status="live", hours=-3)
+        self.run_batch(FakeHolodex(live=[
+            onair,                                                                 # ふつうの配信中 → 載る
+            dict(video("late", KAGETSU, [SHO], status="live", hours=-2),
+                 start_scheduled=radar.iso(radar.now_utc() - timedelta(hours=48))),  # 予定より大きく遅れて開始 → 実際の開始で見るので載る
+            dict(video("stuck", KAGETSU, [SHO], status="live", hours=-30),
+                 start_actual=None),                                               # 実際の開始が無ければ予定で見る → 載らない
+            video("station", KAGETSU, [SHO], status="live", hours=-24 * 15),      # 常時配信（開始から15日）→ 載らない
+        ]))
+        sho = json.loads(self.read("radar", f"{SHO}.json"))
+        self.assertEqual([a["id"] for a in sho["upcoming"]], ["onair", "late"])
+        index = json.loads(self.read("radar", "index.json"))
+        self.assertEqual(next(x for x in index["livers"] if x["channel_id"] == SHO)["next"], onair["start_actual"])
+        self.assertNotIn("station", json.loads(self.read("state.json"))["videos"])   # 状態からも落とす
 
     def test_failure_keeps_previous_outputs(self):
         self.run_batch(FakeHolodex(past=[video("p1", KAGETSU, [SHO])]))
@@ -128,18 +210,13 @@ class RadarTest(unittest.TestCase):
         self.assertEqual(state["last_past_fetch"], past[99]["available_at"])   # 100件目までで止めた
         self.assertNotEqual(state["last_past_fetch"], state["updated_at"])
 
-    def test_ics(self):
-        long_title = "とても長いタイトル" * 10 + ",;"
-        self.run_batch(FakeHolodex(live=[dict(video("up1", KAGETSU, [SHO], status="upcoming", hours=5),
-                                             title=long_title)]))
-        ics = self.read("ics", f"{SHO}.ics")
-        self.assertTrue(ics.startswith("BEGIN:VCALENDAR\r\n"))
-        self.assertIn("UID:up1@niji-oshikatsu-tools", ics)
-        for line in ics.split("\r\n"):
-            self.assertLessEqual(len(line.encode("utf-8")), 75)
-        unfolded = ics.replace("\r\n ", "")
-        self.assertIn("\\,\\;", unfolded)
-        self.assertIn("Powered by Holodex", unfolded)
+    def test_old_ics_outputs_are_removed(self):
+        # カレンダー（ICS）の出力はやめたので、前回までの ics/ が残っていたら消す（公開し続けないため）
+        os.makedirs(os.path.join(self.tmp.name, "ics"))
+        with open(os.path.join(self.tmp.name, "ics", f"{SHO}.ics"), "w", encoding="utf-8") as f:
+            f.write("BEGIN:VCALENDAR\r\n")
+        self.run_batch(FakeHolodex())
+        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "ics")))
 
 
 if __name__ == "__main__":
