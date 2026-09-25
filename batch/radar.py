@@ -8,6 +8,7 @@
   ライバーマスター：環境変数 MASTER_CSV_URL（スプレッドシートを「ウェブに公開」した CSV の URL）。
                     未設定なら ./livers_master.csv
   前回の状態：OUT_DIR/state.json（無ければ初回として過去 BACKFILL_DAYS 日分を取る）
+             画面に出す期間（PAST_SHOW_DAYS 日）のうち取っていない古い分は、毎回 OLDER_MAX_PAGES ずつさかのぼって取る
 出力（OUT_DIR、既定は ./out）
   radar/index.json          … 最終更新時刻と、ライバーごとの件数・次の出演
   radar/{channel_id}.json   … ライバー別の他枠出演と自枠（それぞれ これから／過去）
@@ -38,6 +39,7 @@ UPCOMING_HOURS = 168      # これからの配信は1週間先まで
 BACKFILL_DAYS = 30        # 初回に取る過去の日数
 PAST_OVERLAP_HOURS = 6    # 差分取得の重なり（取りこぼし防止）
 PAST_MAX_PAGES = 40       # 1回の過去分取得のページ上限（50件×40）
+OLDER_MAX_PAGES = 20      # 取っていない古い分を、1回にさかのぼるページ上限（50件×20。Holodex への負荷を抑えて少しずつ）
 COLLAB_PER_RUN = 8        # 他事務所の枠を補うライバー数（1回あたり、順番に回す）
 KEEP_DAYS = 365           # 状態に残す日数
 PAST_SHOW_DAYS = 180      # JSONに載せる過去の日数
@@ -151,6 +153,23 @@ def fetch(state, targets):
     past = holodex.get_all("/videos", {**common, "org": ORG, "status": "past", "from": iso(since),
                                        "sort": "available_at", "order": "asc"}, max_pages=PAST_MAX_PAGES)
 
+    # 画面に出す期間（PAST_SHOW_DAYS）のうち、まだ取っていない古い分を、新しいほうから少しずつさかのぼって取る
+    past_from = parse_time(state.get("past_from")) if last else since
+    if past_from is None:   # past_from を持つ前の状態：いちばん古い過去分から続ける
+        past_from = min((parse_time(v["available_at"]) for v in (state.get("videos") or {}).values()
+                         if v["src"] == "org" and v["status"] == "past" and v.get("available_at")), default=since)
+    goal = now - timedelta(days=PAST_SHOW_DAYS)
+    older = []
+    if past_from > goal:
+        print(f"   {iso(goal)[:10]}〜{iso(past_from)[:10]} の古い分をさかのぼって取得中（最大{OLDER_MAX_PAGES * holodex.PAGE}本）…",
+              flush=True)
+        older = holodex.get_all("/videos", {**common, "org": ORG, "status": "past", "from": iso(goal),
+                                            "to": iso(past_from + timedelta(hours=1)),
+                                            "sort": "available_at", "order": "desc"}, max_pages=OLDER_MAX_PAGES)
+        # 上限で止まったら、取れたいちばん古いところから次の回に続ける
+        past_from = (parse_time(older[-1].get("available_at")) or goal
+                     if len(older) >= OLDER_MAX_PAGES * holodex.PAGE else goal)
+
     # 他事務所の枠への出演は、ライバー別の collabs を少しずつ順番に取って補う
     ids = sorted(targets)
     cursor = state.get("collab_cursor", 0) % max(len(ids), 1)
@@ -168,9 +187,11 @@ def fetch(state, targets):
     return {
         "live": [slim(v, "org") for v in live],
         "past": [slim(v, "org") for v in past],
+        "older": [slim(v, "org") for v in older],
         "collabs": [slim(v, "collab") for v in collabs],
         "fetched_at": iso(now),
         "past_until": past_until,
+        "past_from": iso(past_from),
         "collab_cursor": (cursor + len(turn)) % max(len(ids), 1),
     }
 
@@ -188,7 +209,7 @@ def merge(state, got):
         if v["status"] in ("upcoming", "live") and v["src"] == "org" and vid not in live_ids:
             del videos[vid]
 
-    for v in got["collabs"] + got["past"] + got["live"]:
+    for v in got["collabs"] + got.get("older", []) + got["past"] + got["live"]:
         if v["type"] != "stream":
             continue
         if v["src"] == "collab" and v["id"] in videos and videos[v["id"]]["src"] == "org":
@@ -214,6 +235,7 @@ def merge(state, got):
     return {
         "videos": videos,
         "last_past_fetch": got["past_until"],
+        "past_from": got.get("past_from"),   # にじさんじ全体の過去分を、ここから後はすべて取ってある
         "updated_at": got["fetched_at"],
         "collab_cursor": got["collab_cursor"],
         "schema": STATE_SCHEMA,
@@ -353,7 +375,8 @@ def main():
     write_json(os.path.join(OUT_DIR, "state.json"), new_state)
     total = sum(1 for v in new_state["videos"].values())
     print(f"対象 {len(targets)} 人 / 取得 これから{len(got['live'])}・過去{len(got['past'])}・"
-          f"collabs{len(got['collabs'])} / 保持 {total} 本 / 出力先 {OUT_DIR}")
+          f"さかのぼり{len(got['older'])}・collabs{len(got['collabs'])} / 保持 {total} 本 / "
+          f"過去分は {new_state['past_from'][:10]} から / 出力先 {OUT_DIR}")
     if new_state["last_past_fetch"] != new_state["updated_at"]:
         print("過去の配信は上限で止めました。もう一度実行すると続きから取ります。")
 

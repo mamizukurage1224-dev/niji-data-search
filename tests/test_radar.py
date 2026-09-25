@@ -51,6 +51,20 @@ class FakeHolodex:
         raise AssertionError(path)
 
 
+class DatedHolodex(FakeHolodex):
+    """/videos の from・to・order を効かせる偽物（古い分をさかのぼる取得を確かめる）。"""
+
+    def get(self, path, params=None, retries=3):
+        if path != "/videos":
+            return super().get(path, params, retries)
+        p = params or {}
+        items = [v for v in self.past
+                 if (not p.get("from") or v["available_at"] >= p["from"]) and (not p.get("to") or v["available_at"] <= p["to"])]
+        items.sort(key=lambda v: v["available_at"], reverse=p.get("order") == "desc")
+        offset = p.get("offset", 0)
+        return items[offset:offset + 50]
+
+
 class RadarTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -209,6 +223,44 @@ class RadarTest(unittest.TestCase):
         state = json.loads(self.read("state.json"))
         self.assertEqual(state["last_past_fetch"], past[99]["available_at"])   # 100件目までで止めた
         self.assertNotEqual(state["last_past_fetch"], state["updated_at"])
+
+    def test_older_past_is_backfilled_step_by_step(self):
+        # 1日1本、1〜150日前と、画面に出す期間より前（200日前）
+        past = [video(f"d{d}", KAGETSU, [SHO], hours=-24 * d - 1) for d in [*range(1, 151), 200]]
+        fake = DatedHolodex(past=past)
+        with mock.patch.object(radar, "OLDER_MAX_PAGES", 1):   # 1回にさかのぼるのは50本まで
+            self.run_batch(fake)
+            state = json.loads(self.read("state.json"))
+            self.assertIn("d79", state["videos"])        # 30日前（初回の分）から50本さかのぼった
+            self.assertNotIn("d81", state["videos"])
+            self.assertEqual(state["past_from"], state["videos"]["d79"]["available_at"])
+            self.run_batch(fake)                           # 次の回は続きから
+            self.run_batch(fake)
+            state = json.loads(self.read("state.json"))
+            self.assertIn("d150", state["videos"])
+            self.assertNotIn("d200", state["videos"])     # 画面に出す期間より前は取らない
+            sho = json.loads(self.read("radar", f"{SHO}.json"))
+            self.assertEqual(len(sho["past"]), 150)
+            calls = []
+            with mock.patch.object(holodex, "get",
+                                   lambda p, params=None, retries=3: calls.append((p, params)) or fake.get(p, params)):
+                radar.main()
+            self.assertFalse([params for p, params in calls if p == "/videos" and params.get("to")])   # 取りきったら、もうさかのぼらない
+
+    def test_state_without_past_from_continues_from_the_oldest(self):
+        past = [video(f"d{d}", KAGETSU, [SHO], hours=-24 * d - 1) for d in range(1, 11)]
+        self.run_batch(DatedHolodex(past=past))
+        state = json.loads(self.read("state.json"))
+        state.pop("past_from")   # さかのぼる取得を足す前の形式
+        with open(os.path.join(self.tmp.name, "state.json"), "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        calls = []
+        fake = DatedHolodex(past=past)
+        with mock.patch.object(holodex, "get", lambda p, params=None, retries=3: calls.append((p, params)) or fake.get(p, params)):
+            radar.main()
+        to = next(params["to"] for p, params in calls if p == "/videos" and params.get("to"))
+        oldest = radar.parse_time(past[-1]["available_at"])
+        self.assertEqual(to, radar.iso(oldest + timedelta(hours=1)))
 
     def test_old_ics_outputs_are_removed(self):
         # カレンダー（ICS）の出力はやめたので、前回までの ics/ が残っていたら消す（公開し続けないため）
