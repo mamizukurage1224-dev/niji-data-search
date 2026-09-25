@@ -91,6 +91,11 @@ def build_index(master):
     return targets, owner, names
 
 
+def build_meta(master):
+    """画面の検索と五十音順に使う読み。"""
+    return {r["channel_id"]: {"kana": r.get("kana") or "", "alias": r.get("kana_alias") or ""} for r in master}
+
+
 # ---------- 取得 ----------
 
 def slim(v, src):
@@ -284,7 +289,8 @@ def write_text(path, text):
     os.replace(tmp, path)
 
 
-def write_outputs(state, targets, owner, names):
+def write_outputs(state, targets, owner, names, meta=None):
+    meta = meta or {}
     generated = parse_time(state["updated_at"])
     by_liver = appearances(state["videos"], targets, owner, names)
     show_from = generated - timedelta(days=PAST_SHOW_DAYS)
@@ -301,7 +307,8 @@ def write_outputs(state, targets, owner, names):
         })
         in_ics = upcoming + [a for a in past if parse_time(a["start"]) >= ics_from]
         write_text(os.path.join(OUT_DIR, "ics", f"{cid}.ics"), to_ics(targets[cid], in_ics, generated))
-        index.append({"channel_id": cid, "name": targets[cid], "upcoming": len(upcoming),
+        index.append({"channel_id": cid, "name": targets[cid], **meta.get(cid, {"kana": "", "alias": ""}),
+                      "upcoming": len(upcoming),
                       "past": len(past), "next": upcoming[0]["start"] if upcoming else None})
     write_json(os.path.join(OUT_DIR, "radar", "index.json"), {
         "updated_at": state["updated_at"],
@@ -336,7 +343,7 @@ def main():
         print(f"Holodex からの取得に失敗しました。前回のデータをそのまま残します：{e}", file=sys.stderr)
         sys.exit(1)
     new_state = merge(state, got)
-    write_outputs(new_state, targets, owner, names)
+    write_outputs(new_state, targets, owner, names, build_meta(master))
     write_json(os.path.join(OUT_DIR, "state.json"), new_state)
     total = sum(1 for v in new_state["videos"].values())
     print(f"対象 {len(targets)} 人 / 取得 これから{len(got['live'])}・過去{len(got['past'])}・"

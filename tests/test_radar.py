@@ -14,7 +14,8 @@ import radar    # noqa: E402
 
 SHO, KAGETSU, HOST_SUB, EN = "UCsho", "UCkagetsu", "UCsho_sub", "UCen"
 MASTER = [
-    {"channel_id": SHO, "display_name": "星導ショウ", "branch": "本家", "channel_type": "liver", "inactive": "FALSE"},
+    {"channel_id": SHO, "display_name": "星導ショウ", "kana": "ほしるべしょう", "kana_alias": "しょう",
+     "branch": "本家", "channel_type": "liver", "inactive": "FALSE"},
     {"channel_id": KAGETSU, "display_name": "叢雲カゲツ", "branch": "本家", "channel_type": "liver", "inactive": "FALSE"},
     {"channel_id": HOST_SUB, "display_name": "星導ショウ", "branch": "本家", "channel_type": "sub", "inactive": "FALSE"},
     {"channel_id": EN, "display_name": "", "name_holodex": "EN liver", "branch": "EN", "channel_type": "", "inactive": "FALSE"},
@@ -86,6 +87,7 @@ class RadarTest(unittest.TestCase):
         index = json.loads(self.read("radar", "index.json"))
         self.assertTrue(index["updated_at"])
         self.assertEqual(sorted(x["channel_id"] for x in index["livers"]), [KAGETSU, SHO])
+        self.assertEqual(next(x for x in index["livers"] if x["channel_id"] == SHO)["kana"], "ほしるべしょう")
 
     def test_cancelled_upcoming_is_removed(self):
         self.run_batch(FakeHolodex(live=[video("up1", KAGETSU, [SHO], status="upcoming", hours=5)]))
