@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # 前回の出力と state.json（差分取得に使う）を取り出す。初回は gh-pages が無いので飛ばす
       - name: Restore previous data
@@ -31,7 +31,7 @@ jobs:
             git reset -q
           fi
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
