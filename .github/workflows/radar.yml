@@ -1,0 +1,60 @@
+# 他枠出演レーダーのデータを Holodex から取り、gh-pages ブランチ（GitHub Pages）に置く。
+# 毎時0分前後は遅れやすいので、7分と37分に動かす。
+name: radar
+
+on:
+  schedule:
+    - cron: "7,37 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: radar
+  cancel-in-progress: false
+
+jobs:
+  radar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # 前回の出力と state.json（差分取得に使う）を取り出す。初回は gh-pages が無いので飛ばす
+      - name: Restore previous data
+        run: |
+          if git ls-remote --exit-code --heads origin gh-pages > /dev/null; then
+            git fetch --depth 1 origin gh-pages
+            mkdir -p out
+            git --work-tree=out checkout origin/gh-pages -- .
+            git reset -q
+          fi
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Test
+        run: python -m unittest discover tests
+
+      # 失敗したら（終了コード1）ここで止まり、gh-pages は前回のまま残る
+      - name: Run radar
+        env:
+          HOLODEX_API_KEY: ${{ secrets.HOLODEX_API_KEY }}
+          MASTER_CSV_URL: ${{ vars.MASTER_CSV_URL }}
+          OUT_DIR: out
+        run: python batch/radar.py
+
+      - name: Publish to gh-pages
+        run: |
+          cd out
+          touch .nojekyll
+          git init -q -b gh-pages
+          git add -A
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "data $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push -q -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
