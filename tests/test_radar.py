@@ -35,8 +35,8 @@ def video(vid, host, mentions, status="past", hours=-24, topic=None, duration=36
 
 
 class FakeHolodex:
-    def __init__(self, live=(), past=(), collabs=(), fail=False):
-        self.live, self.past, self.collabs, self.fail = list(live), list(past), list(collabs), fail
+    def __init__(self, live=(), past=(), collabs=(), channels=(), fail=False):
+        self.live, self.past, self.collabs, self.channels, self.fail = list(live), list(past), list(collabs), list(channels), fail
 
     def get(self, path, params=None, retries=3):
         if self.fail:
@@ -48,6 +48,8 @@ class FakeHolodex:
             return self.past[offset:offset + 50]
         if path.endswith("/collabs"):
             return self.collabs
+        if path == "/channels":
+            return self.channels[offset:offset + 50]
         raise AssertionError(path)
 
 
@@ -240,7 +242,8 @@ class RadarTest(unittest.TestCase):
             self.assertIn("d150", state["videos"])
             self.assertNotIn("d200", state["videos"])     # 画面に出す期間より前は取らない
             sho = json.loads(self.read("radar", f"{SHO}.json"))
-            self.assertEqual(len(sho["past"]), 150)
+            archive = json.loads(self.read("radar", "archive", f"{SHO}.json"))
+            self.assertEqual(len(sho["past"]) + len(archive["past"]), 150)
             calls = []
             with mock.patch.object(holodex, "get",
                                    lambda p, params=None, retries=3: calls.append((p, params)) or fake.get(p, params)):
@@ -261,6 +264,66 @@ class RadarTest(unittest.TestCase):
         to = next(params["to"] for p, params in calls if p == "/videos" and params.get("to"))
         oldest = radar.parse_time(past[-1]["available_at"])
         self.assertEqual(to, radar.iso(oldest + timedelta(hours=1)))
+
+    def test_recent_and_archive_are_split(self):
+        # 直近 RECENT_DAYS 日はライバー別JSONに、それより前は archive/ に分ける
+        self.run_batch(FakeHolodex(past=[video("new", KAGETSU, [SHO], hours=-24 * 10),
+                                         video("old", KAGETSU, [SHO], hours=-24 * 60),
+                                         video("own_old", SHO, [], hours=-24 * 90)]))
+        sho = json.loads(self.read("radar", f"{SHO}.json"))
+        archive = json.loads(self.read("radar", "archive", f"{SHO}.json"))
+        self.assertEqual([a["id"] for a in sho["past"]], ["new"])
+        self.assertEqual([a["id"] for a in archive["past"]], ["old"])
+        self.assertEqual([a["id"] for a in archive["own_past"]], ["own_old"])
+        self.assertEqual(sho["recent_from"], archive["to"])
+        index = json.loads(self.read("radar", "index.json"))
+        self.assertEqual(next(x for x in index["livers"] if x["channel_id"] == SHO)["past"], 2)   # 件数は全期間
+
+    def test_files_of_removed_livers_are_dropped(self):
+        os.makedirs(os.path.join(self.tmp.name, "radar"))
+        with open(os.path.join(self.tmp.name, "radar", "UCgone.json"), "w", encoding="utf-8") as f:
+            f.write("{}")
+        self.run_batch(FakeHolodex())
+        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "radar", "UCgone.json")))
+
+    def test_unknown_and_ended_channels_are_reported_once(self):
+        report = os.path.join(self.tmp.name, "channel_check.md")
+        channels = [{"id": SHO, "name": "星導ショウ", "inactive": False},
+                    {"id": "UCnew", "name": "新人|ライバー", "english_name": "Newbie", "group": "新人", "inactive": False},
+                    {"id": EN_LIVER, "name": "Vox Akuma", "inactive": True}]   # マスターでは現役
+        calls = []
+        fake = FakeHolodex(channels=channels)
+        get = lambda p, params=None, retries=3: calls.append(p) or fake.get(p, params)
+        with mock.patch.object(radar, "CHANNEL_REPORT", report), mock.patch.object(holodex, "get", get):
+            radar.main()
+            text = open(report, encoding="utf-8").read()
+            self.assertIn("UCnew", text)
+            self.assertIn("新人／ライバー", text)   # 表が崩れないよう | を置き換える
+            self.assertIn(EN_LIVER, text)
+            self.assertNotIn(f"[{SHO}]", text)
+            os.remove(report)
+            calls.clear()
+            radar.main()                                   # 1日たっていないので確かめない
+            self.assertNotIn("/channels", calls)
+            state = json.loads(self.read("state.json"))
+            state["channels_checked_at"] = radar.iso(radar.now_utc() - timedelta(hours=25))
+            with open(os.path.join(self.tmp.name, "state.json"), "w", encoding="utf-8") as f:
+                json.dump(state, f)
+            radar.main()                                   # 1日たったので確かめるが、同じ顔ぶれなので知らせない
+            self.assertIn("/channels", calls)
+            self.assertFalse(os.path.exists(report))
+
+    def test_channel_check_failure_does_not_stop_the_update(self):
+        fake = FakeHolodex(past=[video("p1", KAGETSU, [SHO])])
+        def get(p, params=None, retries=3):
+            if p == "/channels":
+                raise holodex.HolodexError("テスト用の失敗")
+            return fake.get(p, params)
+        with mock.patch.object(radar, "CHANNEL_REPORT", os.path.join(self.tmp.name, "channel_check.md")), \
+                mock.patch.object(holodex, "get", get):
+            radar.main()
+        self.assertEqual(json.loads(self.read("radar", f"{SHO}.json"))["past"][0]["id"], "p1")
+        self.assertIsNone(json.loads(self.read("state.json"))["channels_checked_at"])   # 次の回にまた確かめる
 
     def test_old_ics_outputs_are_removed(self):
         # カレンダー（ICS）の出力はやめたので、前回までの ics/ が残っていたら消す（公開し続けないため）

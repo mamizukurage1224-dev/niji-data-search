@@ -11,8 +11,11 @@
              画面に出す期間（PAST_SHOW_DAYS 日）のうち取っていない古い分は、毎回 OLDER_MAX_PAGES ずつさかのぼって取る
 出力（OUT_DIR、既定は ./out）
   radar/index.json          … 最終更新時刻と、ライバーごとの件数・次の出演
-  radar/{channel_id}.json   … ライバー別の他枠出演と自枠（それぞれ これから／過去）
+  radar/{channel_id}.json   … ライバー別の他枠出演と自枠（それぞれ これから／直近 RECENT_DAYS 日の過去）
+  radar/archive/{channel_id}.json … それより前（PAST_SHOW_DAYS 日まで）の過去
   state.json                … 次回の差分取得に使う状態
+  ./channel_check.md        … マスターに無いチャンネル（新人など）や、活動を終えたらしいチャンネルを見つけたときだけ書く。
+                              公開せず、ワークフローが Issue にして知らせる（確かめるのは1日1回）
   （カレンダー（ICS）の出力は 2026-09-25 にやめた。以前の ics/ が残っていれば消す）
 
 取得に失敗したら何も書き換えずに終了コード1で終わる（前回のデータを出し続ける）。
@@ -43,8 +46,11 @@ OLDER_MAX_PAGES = 20      # 取っていない古い分を、1回にさかのぼ
 COLLAB_PER_RUN = 8        # 他事務所の枠を補うライバー数（1回あたり、順番に回す）
 KEEP_DAYS = 365           # 状態に残す日数
 PAST_SHOW_DAYS = 180      # JSONに載せる過去の日数
+RECENT_DAYS = 35          # ライバー別JSONに入れる直近の過去の日数。それより前は archive/ に分ける（画面が3か月・6か月のときだけ読む）
 STALE_UPCOMING_HOURS = 12 # 予定時刻を過ぎても配信にならない予定を捨てるまでの時間
 ALWAYS_ON_HOURS = 24      # 開始からこの時間を過ぎても配信中のものは常時配信とみなして捨てる
+CHANNEL_CHECK_HOURS = 24  # Holodex のチャンネル一覧とマスターを比べる間隔
+CHANNEL_REPORT = os.environ.get("CHANNEL_REPORT", "channel_check.md")
 
 EXCLUDED_TOPICS = {"membersonly"}   # メン限は一覧の対象外（二次創作ガイドライン 第1条4項）
 
@@ -322,14 +328,25 @@ def write_outputs(state, targets, owner, names, meta=None):
     by_liver = appearances(state["videos"], targets, owner, names)
     own_by_liver = own_streams(state["videos"], targets, owner, names)
     show_from = generated - timedelta(days=PAST_SHOW_DAYS)
+    recent_from = generated - timedelta(days=RECENT_DAYS)
+    recent = lambda xs: [a for a in xs if parse_time(a["start"]) >= recent_from]
+    older = lambda xs: [a for a in xs if parse_time(a["start"]) < recent_from]
+    # 対象から外れたライバーのファイルを残さないよう、毎回作り直す（前回分は gh-pages から戻してある）
+    shutil.rmtree(os.path.join(OUT_DIR, "radar"), ignore_errors=True)
     index = []
     for cid, items in by_liver.items():
         upcoming, past = split(items, show_from)
         own_upcoming, own_past = split(own_by_liver[cid], show_from)
-        # upcoming・past は他枠出演、own_upcoming・own_past は自枠
+        # upcoming・past は他枠出演、own_upcoming・own_past は自枠。
+        # 過去は直近だけをここに入れ、それより前は archive/ に分ける（普段の読み込みを軽くする）
         write_json(os.path.join(OUT_DIR, "radar", f"{cid}.json"), {
             "channel_id": cid, "name": targets[cid], "updated_at": state["updated_at"],
-            "upcoming": upcoming, "past": past, "own_upcoming": own_upcoming, "own_past": own_past,
+            "recent_from": iso(recent_from),
+            "upcoming": upcoming, "past": recent(past), "own_upcoming": own_upcoming, "own_past": recent(own_past),
+        })
+        write_json(os.path.join(OUT_DIR, "radar", "archive", f"{cid}.json"), {
+            "channel_id": cid, "updated_at": state["updated_at"], "from": iso(show_from), "to": iso(recent_from),
+            "past": older(past), "own_past": older(own_past),
         })
         index.append({"channel_id": cid, "name": targets[cid],
                       **meta.get(cid, {"kana": "", "alias": "", "color": "", "group": ""}),
@@ -343,6 +360,43 @@ def write_outputs(state, targets, owner, names, meta=None):
     })
     # カレンダー（ICS）の出力はやめた。前回までの出力（gh-pages から戻したもの）が残っていれば消す
     shutil.rmtree(os.path.join(OUT_DIR, "ics"), ignore_errors=True)
+
+
+# ---------- マスターの見直しの知らせ ----------
+
+def check_channels(state, master, now):
+    """1日1回、Holodex のにじさんじのチャンネル一覧とマスターを比べる。確かめる時期でなければ None。"""
+    last = parse_time(state.get("channels_checked_at"))
+    if last and now - last < timedelta(hours=CHANNEL_CHECK_HOURS):
+        return None
+    channels = holodex.get_all("/channels", {"org": ORG, "type": "vtuber"}, max_pages=20)
+    known = {r["channel_id"]: r for r in master}
+    return {
+        "checked_at": iso(now),
+        # マスターに無い：新人のデビュー、新しいユニットや公式のチャンネルなど
+        "new": [c for c in channels if c.get("id") and c["id"] not in known],
+        # Holodex では活動終了なのに、マスターでは現役：卒業・契約解除など
+        "ended": [c for c in channels if c.get("inactive") and c.get("id") in known
+                  and known[c["id"]].get("inactive") != "TRUE"],
+    }
+
+
+def write_channel_report(check):
+    def table(rows):
+        cell = lambda t: (t or "").replace("|", "／")
+        return "\n".join(["| 名前 | 英語名 | グループ | チャンネル |", "|---|---|---|---|"] + [
+            f"| {cell(c.get('name'))} | {cell(c.get('english_name'))} | {cell(c.get('group'))} | "
+            f"[{c['id']}](https://www.youtube.com/channel/{c['id']}) |" for c in rows])
+    parts = [f"Holodex のにじさんじのチャンネル一覧と、ライバーマスターを比べた結果です（{check['checked_at'][:10]}）。"
+             "マスターを直すと、サイトに反映されます。"]
+    if check["new"]:
+        parts += ["## マスターに無いチャンネル（新人・新しいユニットなど）", table(check["new"])]
+    if check["ended"]:
+        parts += ["## 活動を終えたらしいチャンネル（Holodex では活動終了、マスターでは現役）", table(check["ended"])]
+    parts.append("直し方：手元で `nijisanji_check.py` → `build_master.py` を実行して livers_master.csv を作り直し、"
+                 "niji-data-search にも写す（own_rules 列は除く）。MASTER_CSV_URL を使っているならスプレッドシートも直す。")
+    with open(CHANNEL_REPORT, "w", encoding="utf-8") as f:
+        f.write("\n\n".join(parts) + "\n")
 
 
 # ---------- 実行 ----------
@@ -371,6 +425,21 @@ def main():
         print(f"Holodex からの取得に失敗しました。前回のデータをそのまま残します：{e}", file=sys.stderr)
         sys.exit(1)
     new_state = merge(state, got)
+    # マスターの見直しが要るチャンネルを1日1回確かめる。失敗してもデータの更新は続け、次の回にまた試す
+    new_state["channels_checked_at"] = state.get("channels_checked_at")
+    new_state["channels_reported"] = state.get("channels_reported", [])
+    try:
+        check = check_channels(state, master, parse_time(got["fetched_at"]))
+    except holodex.HolodexError as e:
+        print(f"チャンネル一覧を取れませんでした（次の回にまた確かめます）：{e}", file=sys.stderr)
+        check = None
+    if check:
+        ids = sorted(c["id"] for c in check["new"] + check["ended"])
+        if ids and ids != new_state["channels_reported"]:   # 前回知らせたのと同じ顔ぶれなら、くり返し知らせない
+            write_channel_report(check)
+            print(f"マスターの見直しが要るチャンネルがあります：{len(check['new'])} 件が未登録、{len(check['ended'])} 件が活動終了")
+        new_state["channels_checked_at"] = check["checked_at"]
+        new_state["channels_reported"] = ids
     write_outputs(new_state, targets, owner, names, build_meta(master))
     write_json(os.path.join(OUT_DIR, "state.json"), new_state)
     total = sum(1 for v in new_state["videos"].values())

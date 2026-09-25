@@ -1,14 +1,15 @@
 # 他枠出演レーダーのデータを Holodex から取り、gh-pages ブランチ（GitHub Pages）に置く。
-# 毎時0分前後は遅れやすいので、7分と37分に動かす。
+# 定期実行は GitHub の schedule を使わず、Cloudflare の Worker（niji-oshikatsu-tools の trigger/）が
+# 毎時7分と37分に workflow_dispatch で起こす（schedule は数時間遅れることがあり、
+# 公開リポジトリで60日動きがないと止まるため。2026-09-26）。手動実行もここから。
 name: radar
 
 on:
-  schedule:
-    - cron: "7,37 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
+  issues: write   # マスターの見直しが要るチャンネルを Issue で知らせる
 
 concurrency:
   group: radar
@@ -44,7 +45,9 @@ jobs:
           HOLODEX_API_KEY: ${{ secrets.HOLODEX_API_KEY }}
           MASTER_CSV_URL: ${{ vars.MASTER_CSV_URL }}
           OUT_DIR: out
-        run: python batch/radar.py
+        run: |
+          rm -f channel_check.md
+          python batch/radar.py
 
       - name: Publish to gh-pages
         run: |
@@ -58,3 +61,19 @@ jobs:
           git push -q -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" gh-pages
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # マスターに無いチャンネル（新人など）や、活動を終えたらしいチャンネルを見つけたら Issue で知らせる。
+      # 開いている同じ題名の Issue があれば、そこにコメントを足す（どちらも通知が届く）
+      - name: Report channels to review
+        if: hashFiles('channel_check.md') != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          title="ライバーマスターの見直しが必要なチャンネルがあります"
+          num=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" \
+                  --json number --jq '.[0].number // empty')
+          if [ -n "$num" ]; then
+            gh issue comment "$num" --repo "$GITHUB_REPOSITORY" --body-file channel_check.md
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file channel_check.md
+          fi
