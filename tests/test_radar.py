@@ -35,8 +35,9 @@ def video(vid, host, mentions, status="past", hours=-24, topic=None, duration=36
 
 
 class FakeHolodex:
-    def __init__(self, live=(), past=(), collabs=(), channels=(), fail=False):
+    def __init__(self, live=(), past=(), collabs=(), channels=(), missing=(), fail=False):
         self.live, self.past, self.collabs, self.channels, self.fail = list(live), list(past), list(collabs), list(channels), fail
+        self.missing = list(missing)   # /videos?status=missing（非公開・削除になった動画）で返すもの
 
     def get(self, path, params=None, retries=3):
         if self.fail:
@@ -44,6 +45,8 @@ class FakeHolodex:
         offset = (params or {}).get("offset", 0)
         if path == "/live":
             return self.live[offset:offset + 50]
+        if path == "/videos" and (params or {}).get("status") == "missing":
+            return self.missing[offset:offset + 50]
         if path == "/videos":
             return self.past[offset:offset + 50]
         if path.endswith("/collabs"):
@@ -57,7 +60,7 @@ class DatedHolodex(FakeHolodex):
     """/videos の from・to・order を効かせる偽物（古い分をさかのぼる取得を確かめる）。"""
 
     def get(self, path, params=None, retries=3):
-        if path != "/videos":
+        if path != "/videos" or (params or {}).get("status") == "missing":
             return super().get(path, params, retries)
         p = params or {}
         items = [v for v in self.past
@@ -361,6 +364,30 @@ class RadarTest(unittest.TestCase):
         sho = json.loads(self.read("radar", f"{SHO}.json"))
         self.assertEqual([a["id"] for a in sho["own_past"]], ["ok1"])
         self.assertEqual(sho["past"], [])
+
+    def test_today_lists_everyones_live_and_upcoming(self):
+        # 「にじさんじ全体」：対象のライバー全員の、配信中と今日・明日の配信予定。出演する対象のライバーは cast に入れる
+        self.run_batch(FakeHolodex(live=[
+            video("now", SHO, [], status="live", hours=-1),
+            video("soon", KAGETSU, [SHO, "UCother"], status="upcoming", hours=5),
+            video("later", KAGETSU, [], status="upcoming", hours=24 * 3),               # 明後日より先は載せない
+            video("cn", CN, [], status="upcoming", hours=2),                            # 対象外のライバー
+            dict(video("mem", SHO, [], status="upcoming", hours=3), title="【メン限】雑談"),  # メン限
+        ], past=[video("done", SHO, [])]))                                              # 終わった配信は載せない
+        today = json.loads(self.read("radar", "today.json"))
+        self.assertEqual([a["id"] for a in today["items"]], ["now", "soon"])
+        self.assertEqual(today["items"][1]["cast"], [SHO])
+
+    def test_missing_videos_are_dropped(self):
+        # あとから非公開・削除になった動画（Holodex で status=missing）は、一覧から外す
+        self.run_batch(FakeHolodex(past=[video("keep", SHO, []), video("gone", SHO, [])]))
+        self.assertEqual({a["id"] for a in json.loads(self.read("radar", f"{SHO}.json"))["own_past"]}, {"keep", "gone"})
+        state = json.loads(self.read("state.json"))
+        state["missing_checked_at"] = radar.iso(radar.now_utc() - timedelta(hours=25))   # 1日たった
+        with open(os.path.join(self.tmp.name, "state.json"), "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        self.run_batch(FakeHolodex(missing=[dict(video("gone", SHO, []), status="missing")]))
+        self.assertEqual([a["id"] for a in json.loads(self.read("radar", f"{SHO}.json"))["own_past"]], ["keep"])
 
     def test_old_ics_outputs_are_removed(self):
         # カレンダー（ICS）の出力はやめたので、前回までの ics/ が残っていたら消す（公開し続けないため）

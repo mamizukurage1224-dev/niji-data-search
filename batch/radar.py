@@ -13,6 +13,7 @@
   radar/index.json          … 最終更新時刻と、ライバーごとの件数・次の出演
   radar/{channel_id}.json   … ライバー別の他枠出演と自枠（それぞれ これから／直近 RECENT_DAYS 日の過去）
   radar/archive/{channel_id}.json … それより前（PAST_SHOW_DAYS 日まで）の過去
+  radar/today.json          … 対象のライバー全員の、配信中と今日・明日（日本時間）の配信予定（画面の「にじさんじ全体」）
   state.json                … 次回の差分取得に使う状態
   ./channel_check.md        … マスターに無いチャンネル（新人など）や、活動を終えたらしいチャンネルを見つけたときだけ書く。
                               公開せず、ワークフローが Issue にして知らせる（確かめるのは1日1回）
@@ -46,8 +47,10 @@ OLDER_MAX_PAGES = 20      # 取っていない古い分を、1回にさかのぼ
 COLLAB_PER_RUN = 8        # 他事務所の枠を補うライバー数（1回あたり、順番に回す）
 HEAVY_EVERY_MINUTES = 25  # 他事務所の枠の補いと古い分のさかのぼりは、前回からこれだけたったときだけ行う
                           # （実行は15分おき。これからの配信と新しい過去分は毎回、重い取得は30分に1回にして Holodex への負荷を抑える）
-KEEP_DAYS = 365           # 状態に残す日数
+KEEP_DAYS = 190           # 状態に残す日数（画面に出すのは PAST_SHOW_DAYS まで。余分に持つと state.json が膨らむだけなので少しの余裕だけ）
 PAST_SHOW_DAYS = 180      # JSONに載せる過去の日数
+MISSING_CHECK_HOURS = 24  # 非公開・削除になった動画（Holodex の status=missing）を確かめる間隔
+MISSING_MAX_PAGES = 10    # 1回に確かめる上限（50件×10。新しいほうから）
 RECENT_DAYS = 35          # ライバー別JSONに入れる直近の過去の日数。それより前は archive/ に分ける（画面が3か月・6か月のときだけ読む）
 STALE_UPCOMING_HOURS = 12 # 予定時刻を過ぎても配信にならない予定を捨てるまでの時間
 ALWAYS_ON_HOURS = 24      # 開始からこの時間を過ぎても配信中のものは常時配信とみなして捨てる
@@ -187,6 +190,16 @@ def fetch(state, targets):
         past_from = (parse_time(older[-1].get("available_at")) or goal
                      if len(older) >= OLDER_MAX_PAGES * holodex.PAGE else goal)
 
+    # 非公開・削除になった動画は、Holodex が status=missing にする。画面に出す期間のぶんを1日1回まとめて取り、一覧から外す
+    # （1本ずつ確かめるより呼び出しがずっと少ない）
+    missing_at = parse_time(state.get("missing_checked_at"))
+    check_missing = heavy and (not missing_at or now - missing_at >= timedelta(hours=MISSING_CHECK_HOURS))
+    missing = []
+    if check_missing:
+        print("   非公開・削除になった動画を確かめています…", flush=True)
+        missing = holodex.get_all("/videos", {"type": "stream", "org": ORG, "status": "missing", "from": iso(goal),
+                                              "sort": "available_at", "order": "desc"}, max_pages=MISSING_MAX_PAGES)
+
     # 他事務所の枠への出演は、ライバー別の collabs を少しずつ順番に取って補う
     ids = sorted(targets)
     cursor = state.get("collab_cursor", 0) % max(len(ids), 1)
@@ -212,6 +225,8 @@ def fetch(state, targets):
         "past_from": iso(past_from),
         "collab_cursor": (cursor + len(turn)) % max(len(ids), 1),
         "heavy_at": iso(now) if heavy else state.get("heavy_at"),
+        "missing": [v["id"] for v in missing if v.get("id")],
+        "missing_checked_at": iso(now) if check_missing else state.get("missing_checked_at"),
     }
 
 
@@ -234,6 +249,11 @@ def merge(state, got):
         if v["src"] == "collab" and v["id"] in videos and videos[v["id"]]["src"] == "org":
             v["src"] = "org"
         videos[v["id"]] = v
+
+    # 非公開・削除になった動画は missing にして、一覧に載せない（KEEP_DAYS を過ぎれば状態からも消える）
+    for vid in got.get("missing", []):
+        if vid in videos:
+            videos[vid]["status"] = "missing"
 
     for vid, v in list(videos.items()):
         start = parse_time(v["start_scheduled"] or v["available_at"])
@@ -258,6 +278,7 @@ def merge(state, got):
         "updated_at": got["fetched_at"],
         "collab_cursor": got["collab_cursor"],
         "heavy_at": got.get("heavy_at"),   # 他事務所の枠の補いと古い分のさかのぼりを最後に行った時刻
+        "missing_checked_at": got.get("missing_checked_at"),   # 非公開・削除になった動画を最後に確かめた時刻
         "schema": STATE_SCHEMA,
     }
 
@@ -336,6 +357,25 @@ def write_json(path, data):
     os.replace(tmp, path)
 
 
+JST = timezone(timedelta(hours=9))
+
+
+def today_items(videos, targets, owner, names, generated):
+    """対象のライバー全員の、配信中と今日・明日（日本時間）の配信予定。cast はその枠に出る対象のライバー（枠の主は除く）。"""
+    until = datetime.combine(generated.astimezone(JST).date() + timedelta(days=2), datetime.min.time(), JST)
+    items = []
+    for v in videos.values():
+        if excluded(v) or v["status"] not in ("upcoming", "live"):
+            continue
+        host = owner.get(v["channel_id"], v["channel_id"])
+        start = parse_time(v["start_scheduled"] or v["available_at"])
+        if host not in targets or (v["status"] == "upcoming" and start and start >= until):
+            continue
+        items.append({**entry(v, owner, names),
+                      "cast": [m for m in dict.fromkeys(v["mentions"]) if m in targets and m != host]})
+    return sorted(items, key=lambda a: a["start"] or "")
+
+
 def write_outputs(state, targets, owner, names, meta=None):
     meta = meta or {}
     generated = parse_time(state["updated_at"])
@@ -367,6 +407,10 @@ def write_outputs(state, targets, owner, names, meta=None):
                       "upcoming": len(upcoming), "past": len(past),
                       "own_upcoming": len(own_upcoming), "own_past": len(own_past),
                       "next": upcoming[0]["start"] if upcoming else None})
+    write_json(os.path.join(OUT_DIR, "radar", "today.json"), {
+        "updated_at": state["updated_at"],
+        "items": today_items(state["videos"], targets, owner, names, generated),
+    })
     write_json(os.path.join(OUT_DIR, "radar", "index.json"), {
         "updated_at": state["updated_at"],
         "source": "Holodex API (https://holodex.net/)",
