@@ -44,6 +44,8 @@ PAST_OVERLAP_HOURS = 6    # 差分取得の重なり（取りこぼし防止）
 PAST_MAX_PAGES = 40       # 1回の過去分取得のページ上限（50件×40）
 OLDER_MAX_PAGES = 20      # 取っていない古い分を、1回にさかのぼるページ上限（50件×20。Holodex への負荷を抑えて少しずつ）
 COLLAB_PER_RUN = 8        # 他事務所の枠を補うライバー数（1回あたり、順番に回す）
+HEAVY_EVERY_MINUTES = 25  # 他事務所の枠の補いと古い分のさかのぼりは、前回からこれだけたったときだけ行う
+                          # （実行は15分おき。これからの配信と新しい過去分は毎回、重い取得は30分に1回にして Holodex への負荷を抑える）
 KEEP_DAYS = 365           # 状態に残す日数
 PAST_SHOW_DAYS = 180      # JSONに載せる過去の日数
 RECENT_DAYS = 35          # ライバー別JSONに入れる直近の過去の日数。それより前は archive/ に分ける（画面が3か月・6か月のときだけ読む）
@@ -53,6 +55,13 @@ CHANNEL_CHECK_HOURS = 24  # Holodex のチャンネル一覧とマスターを�
 CHANNEL_REPORT = os.environ.get("CHANNEL_REPORT", "channel_check.md")
 
 EXCLUDED_TOPICS = {"membersonly"}   # メン限は一覧の対象外（二次創作ガイドライン 第1条4項）
+# Holodex がメン限と分類しなかった回も、題名で除く（二重の網。公開の枠の題名にこの言葉があっても、厳しい側に倒して除く）
+MEMBERS_TITLE = re.compile(r"メン限|メンバー(?:シップ)?(?:様)?限定|members?[\s'’-]*only", re.IGNORECASE)
+
+
+def excluded(v):
+    """一覧に載せない回：メン限（Holodex の分類か題名）と、YouTube から消えた回。"""
+    return v["topic_id"] in EXCLUDED_TOPICS or v["status"] == "missing" or bool(MEMBERS_TITLE.search(v.get("title") or ""))
 
 # 画面に出すブランチと、画面での分け方（jp：にじさんじ、en：NIJISANJI EN）。
 # 旧KR・旧ID出身の現役ライバーはいまは にじさんじ所属なので jp に入れる。VirtuaReal は YouTube の配信がほぼ無いので出さない
@@ -165,8 +174,10 @@ def fetch(state, targets):
         past_from = min((parse_time(v["available_at"]) for v in (state.get("videos") or {}).values()
                          if v["src"] == "org" and v["status"] == "past" and v.get("available_at")), default=since)
     goal = now - timedelta(days=PAST_SHOW_DAYS)
+    heavy_at = parse_time(state.get("heavy_at"))
+    heavy = not heavy_at or now - heavy_at >= timedelta(minutes=HEAVY_EVERY_MINUTES)
     older = []
-    if past_from > goal:
+    if heavy and past_from > goal:
         print(f"   {iso(goal)[:10]}〜{iso(past_from)[:10]} の古い分をさかのぼって取得中（最大{OLDER_MAX_PAGES * holodex.PAGE}本）…",
               flush=True)
         older = holodex.get_all("/videos", {**common, "org": ORG, "status": "past", "from": iso(goal),
@@ -179,8 +190,9 @@ def fetch(state, targets):
     # 他事務所の枠への出演は、ライバー別の collabs を少しずつ順番に取って補う
     ids = sorted(targets)
     cursor = state.get("collab_cursor", 0) % max(len(ids), 1)
-    turn = [ids[(cursor + i) % len(ids)] for i in range(min(COLLAB_PER_RUN, len(ids)))]
-    print(f"3/3 他事務所の枠への出演を {len(turn)} 人分取得中…", flush=True)
+    turn = [ids[(cursor + i) % len(ids)] for i in range(min(COLLAB_PER_RUN, len(ids)))] if heavy else []
+    print(f"3/3 他事務所の枠への出演を {len(turn)} 人分取得中…" if heavy
+          else "3/3 他事務所の枠の補いと古い分のさかのぼりは、今回は休み（前回から間がないため）", flush=True)
     collabs = []
     for cid in turn:
         collabs.extend(holodex.as_list(holodex.get(f"/channels/{cid}/collabs",
@@ -199,6 +211,7 @@ def fetch(state, targets):
         "past_until": past_until,
         "past_from": iso(past_from),
         "collab_cursor": (cursor + len(turn)) % max(len(ids), 1),
+        "heavy_at": iso(now) if heavy else state.get("heavy_at"),
     }
 
 
@@ -244,6 +257,7 @@ def merge(state, got):
         "past_from": got.get("past_from"),   # にじさんじ全体の過去分を、ここから後はすべて取ってある
         "updated_at": got["fetched_at"],
         "collab_cursor": got["collab_cursor"],
+        "heavy_at": got.get("heavy_at"),   # 他事務所の枠の補いと古い分のさかのぼりを最後に行った時刻
         "schema": STATE_SCHEMA,
     }
 
@@ -284,7 +298,7 @@ def appearances(videos, targets, owner, names):
     """ライバーごとの他枠出演。自分（とサブチャンネル）の枠は除く。"""
     result = {cid: [] for cid in targets}
     for v in videos.values():
-        if v["topic_id"] in EXCLUDED_TOPICS or v["status"] == "missing":
+        if excluded(v):
             continue
         host = owner.get(v["channel_id"], v["channel_id"])
         for cid in v["mentions"]:
@@ -297,7 +311,7 @@ def own_streams(videos, targets, owner, names):
     """ライバーごとの自枠（本人とサブチャンネルの枠）。"""
     result = {cid: [] for cid in targets}
     for v in videos.values():
-        if v["topic_id"] in EXCLUDED_TOPICS or v["status"] == "missing":
+        if excluded(v):
             continue
         host = owner.get(v["channel_id"], v["channel_id"])
         if host in result:

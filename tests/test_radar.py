@@ -73,7 +73,9 @@ class RadarTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         patches = [mock.patch.object(radar, "OUT_DIR", self.tmp.name),
                    mock.patch.object(radar, "load_master", lambda: MASTER),
-                   mock.patch.object(holodex, "WAIT_SEC", 0)]
+                   mock.patch.object(holodex, "WAIT_SEC", 0),
+                   # 続けて実行しても毎回、他事務所の枠の補いと古い分のさかのぼりをする（間引きは専用のテストで確かめる）
+                   mock.patch.object(radar, "HEAVY_EVERY_MINUTES", 0)]
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
@@ -324,6 +326,41 @@ class RadarTest(unittest.TestCase):
             radar.main()
         self.assertEqual(json.loads(self.read("radar", f"{SHO}.json"))["past"][0]["id"], "p1")
         self.assertIsNone(json.loads(self.read("state.json"))["channels_checked_at"])   # 次の回にまた確かめる
+
+    def test_heavy_fetches_run_every_other_time(self):
+        # 15分おきの実行では、これからの配信と新しい過去分は毎回、collabs と古い分のさかのぼりは間を空けて取る
+        past = [video(f"d{d}", KAGETSU, [SHO], hours=-24 * d - 1) for d in range(1, 60)]
+        fake = DatedHolodex(past=past)
+        calls = []
+        get = lambda p, params=None, retries=3: calls.append((p, params or {})) or fake.get(p, params)
+        heavy = lambda: [p for p, params in calls if p.endswith("/collabs") or (p == "/videos" and params.get("to"))]
+        with mock.patch.object(radar, "HEAVY_EVERY_MINUTES", 25), mock.patch.object(holodex, "get", get):
+            radar.main()
+            self.assertTrue(heavy())                        # 初回は取る
+            calls.clear()
+            radar.main()                                    # すぐ次の回は休む
+            self.assertFalse(heavy())
+            self.assertIn("/live", [p for p, _ in calls])   # これからの配信は毎回取る
+            state = json.loads(self.read("state.json"))
+            state["heavy_at"] = radar.iso(radar.now_utc() - timedelta(minutes=26))
+            with open(os.path.join(self.tmp.name, "state.json"), "w", encoding="utf-8") as f:
+                json.dump(state, f)
+            calls.clear()
+            radar.main()                                    # 25分たてばまた取る
+            self.assertTrue(heavy())
+
+    def test_members_only_titles_are_excluded(self):
+        # Holodex がメン限と分類していなくても、題名にメン限の言葉があれば載せない（自枠・他枠とも）
+        self.run_batch(FakeHolodex(past=[
+            dict(video("m1", SHO, []), title="【メン限】まったり雑談"),
+            dict(video("m2", KAGETSU, [SHO]), title="Members Only Karaoke!"),
+            dict(video("m3", SHO, []), title="メンバーシップ限定 歌枠"),
+            dict(video("ok1", SHO, []), title="メンバーと遊ぶ #にじさんじ"),   # 「メンバー」だけなら載せる
+            video("mt", SHO, [], topic="membersonly"),                          # これまでどおり分類でも除く
+        ]))
+        sho = json.loads(self.read("radar", f"{SHO}.json"))
+        self.assertEqual([a["id"] for a in sho["own_past"]], ["ok1"])
+        self.assertEqual(sho["past"], [])
 
     def test_old_ics_outputs_are_removed(self):
         # カレンダー（ICS）の出力はやめたので、前回までの ics/ が残っていたら消す（公開し続けないため）

@@ -1,0 +1,46 @@
+# 公開中のデータ（radar/index.json）の鮮度を6時間ごとに確かめ、3時間より古ければ Issue で知らせる。
+# 起こし役（Cloudflare の niji-data-trigger）の GITHUB_TOKEN の期限切れなどで radar が動かなくなると、
+# Actions の失敗メールも届かないため、外から見て気づけるようにする。更新が戻ったら Issue を閉じる。
+# （GitHub の schedule は数時間遅れることがあるが、見張りには十分）
+name: watchdog
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check data freshness
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STALE_SECONDS: "10800"   # 3時間（画面の「更新が止まっているようです」と同じ）
+        run: |
+          url="https://mamizukurage1224-dev.github.io/niji-data-search/radar/index.json"
+          updated=$(curl -fsSL "$url" | python3 -c 'import json, sys; print(json.load(sys.stdin)["updated_at"])')
+          age=$(( $(date -u +%s) - $(date -u -d "$updated" +%s) ))
+          echo "最終更新 $updated（$((age / 60))分前）"
+          title="データの更新が止まっています"
+          num=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" \
+                  --json number --jq '.[0].number // empty')
+          if [ "$age" -gt "$STALE_SECONDS" ]; then
+            if [ -z "$num" ]; then
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body \
+                "公開中のデータの最終更新は $updated（約$((age / 3600))時間前）です。
+
+          考えられる原因と確かめる所：
+          - Cloudflare の起こし役（niji-data-trigger）の Secret GITHUB_TOKEN の期限切れ → Cloudflare の niji-data-trigger のログ（Observability）。期限切れなら GitHub でトークンを作り直して入れ替える
+          - radar の失敗（Holodex の不調など）→ Actions の radar の実行履歴
+
+          更新が戻ると、この Issue は自動で閉じます。"
+            fi
+            exit 1
+          elif [ -n "$num" ]; then
+            gh issue close "$num" --repo "$GITHUB_REPOSITORY" --comment "更新が戻りました（最終更新 $updated）。"
+          fi

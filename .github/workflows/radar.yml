@@ -1,6 +1,6 @@
 # 他枠出演レーダーのデータを Holodex から取り、gh-pages ブランチ（GitHub Pages）に置く。
 # 定期実行は GitHub の schedule を使わず、Cloudflare の Worker（niji-oshikatsu-tools の trigger/）が
-# 毎時7分と37分に workflow_dispatch で起こす（schedule は数時間遅れることがあり、
+# 毎時7・22・37・52分に workflow_dispatch で起こす（schedule は数時間遅れることがあり、
 # 公開リポジトリで60日動きがないと止まるため。2026-09-26）。手動実行もここから。
 name: radar
 

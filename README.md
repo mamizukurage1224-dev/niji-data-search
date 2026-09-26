@@ -10,7 +10,8 @@ ANYCOLOR株式会社およびにじさんじ公式とは関係ありません。
 ## 中身
 
 - `batch/radar.py` … 配信の一覧（自枠・他枠）のデータを作るバッチ（`batch/holodex.py` が API の呼び出し）
-- `.github/workflows/radar.yml` … 30分ごと（毎時7分・37分。Cloudflare の Worker が workflow_dispatch で起こす）に実行し、出力を `gh-pages` ブランチに置く
+- `.github/workflows/radar.yml` … 15分ごと（毎時7・22・37・52分。Cloudflare の Worker が workflow_dispatch で起こす）に実行し、出力を `gh-pages` ブランチに置く。他事務所の枠の補いと古い分のさかのぼりは30分に1回（`HEAVY_EVERY_MINUTES`）
+- `.github/workflows/watchdog.yml` … 6時間ごとに公開中のデータの鮮度を確かめ、3時間より古ければ Issue「データの更新が止まっています」で知らせる（戻ったら閉じる）
 - `livers_master.csv` … ライバーマスターの控え。リポジトリ変数 `MASTER_CSV_URL`（スプレッドシートを「ウェブに公開」した CSV）があればそちらを使う
 
 ## 出力（GitHub Pages）
@@ -22,7 +23,7 @@ ANYCOLOR株式会社およびにじさんじ公式とは関係ありません。
 
 1日1回、Holodex のにじさんじのチャンネル一覧とマスターを比べ、マスターに無いチャンネル（新人など）や活動を終えたらしいチャンネルがあれば、Issue（「ライバーマスターの見直しが必要なチャンネルがあります」）で知らせます。
 
-YouTube の配信・動画だけが対象です（Twitch などは対象外）。メンバー限定配信も対象外です。取得に失敗したときは、前回のデータをそのまま出し続けます。
+YouTube の配信・動画だけが対象です（Twitch などは対象外）。メンバー限定配信も対象外です（Holodex の分類に加えて、題名に「メン限」「メンバー限定」「Members only」などがある回も除く）。取得に失敗したときは、前回のデータをそのまま出し続けます。
 カレンダー（ICS）の出力は 2026-09-25 にやめました（以前の `ics/` はバッチが消します）。
 
 ## 設定
