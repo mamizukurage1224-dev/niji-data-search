@@ -17,7 +17,7 @@ MASTER = [
     {"channel_id": EN_LIVER, "display_name": "Vox Akuma", "branch": "EN", "channel_type": "liver", "inactive": "FALSE"},
     {"channel_id": EX_KR, "display_name": "ハ ユン", "branch": "旧KR", "channel_type": "liver", "inactive": "FALSE"},
     {"channel_id": CN, "display_name": "VR liver", "branch": "CN", "channel_type": "liver", "inactive": "FALSE"},
-    {"channel_id": SHO, "display_name": "星導ショウ", "kana": "ほしるべしょう", "kana_alias": "しょう",
+    {"channel_id": SHO, "display_name": "星導ショウ", "english_name": "Hoshirube Sho", "kana": "ほしるべしょう", "kana_alias": "しょう",
      "branch": "本家", "channel_type": "liver", "inactive": "FALSE", "color": "#a58cdc"},
     {"channel_id": KAGETSU, "display_name": "叢雲カゲツ", "branch": "本家", "channel_type": "liver", "inactive": "FALSE",
      "color": "red; background: url(x)"},
@@ -26,12 +26,13 @@ MASTER = [
 ]
 
 
-def video(vid, host, mentions, status="past", hours=-24, topic=None, duration=3600):
+def video(vid, host, mentions, status="past", hours=-24, topic=None, duration=3600, description=None):
     start = radar.iso(radar.now_utc() + timedelta(hours=hours))
     return {"id": vid, "title": f"title {vid}", "type": "stream", "topic_id": topic, "status": status,
             "channel": {"id": host, "name": host}, "start_scheduled": start,
             "start_actual": start if status != "upcoming" else None, "available_at": start,
-            "duration": duration if status == "past" else 0, "mentions": [{"id": m} for m in mentions]}
+            "duration": duration if status == "past" else 0, "mentions": [{"id": m} for m in mentions],
+            "description": description}
 
 
 class FakeHolodex:
@@ -395,6 +396,38 @@ class RadarTest(unittest.TestCase):
             json.dump(state, f)
         self.run_batch(FakeHolodex(missing=[dict(video("gone", SHO, []), status="missing")]))
         self.assertEqual([a["id"] for a in json.loads(self.read("radar", f"{SHO}.json"))["own_past"]], ["keep"])
+
+    def test_credit_only_names(self):
+        idents = radar.build_idents(MASTER)
+        f = lambda desc, title="雑談": radar.credit_only(title, desc, [SHO], idents)
+        # サムネなどのクレジットにだけ名前がある → 出演から外す（ハンドルは英語名から見つける）
+        self.assertEqual(f("うおおおお\n\nサムネは毎度おなじみ\n@HoshirubeSho\n\n===\n©Konami"), {SHO})
+        self.assertEqual(f("Thumbnail by @HoshirubeSho"), {SHO})
+        self.assertEqual(f("【イラスト】\n@HoshirubeSho"), {SHO})
+        self.assertEqual(f("サムネイラスト：星導ショウさん"), {SHO})
+        # 本当の共演者は消さない：ほかの所にも名前がある・題名にある・同じ行に出演が並ぶ・見出しの次が別の項目・普通の文
+        self.assertEqual(f("出演：@HoshirubeSho\nサムネ：@HoshirubeSho"), set())
+        self.assertEqual(f("サムネ：@HoshirubeSho", title="【コラボ】星導ショウと雑談"), set())
+        self.assertEqual(f("サムネ：@someone / 出演：@HoshirubeSho"), set())
+        self.assertEqual(f("サムネは毎度おなじみ\nコラボ相手：@HoshirubeSho"), set())
+        self.assertEqual(f("今日は @HoshirubeSho とイラストを描きます"), set())
+        self.assertEqual(f(""), set())
+
+    def test_thumbnail_artist_is_not_cast(self):
+        calls = []
+        fake = FakeHolodex(
+            live=[video("up1", KAGETSU, [SHO], status="upcoming", hours=5, description="サムネは毎度おなじみ\n@HoshirubeSho")],
+            past=[video("p1", KAGETSU, [SHO], description="サムネ：@HoshirubeSho"),
+                  video("p2", KAGETSU, [SHO], description="出演：@HoshirubeSho")])
+        with mock.patch.object(holodex, "get", lambda p, params=None, retries=3: calls.append((p, params)) or fake.get(p, params)):
+            radar.main()
+        self.assertTrue(all("description" in params["include"] for p, params in calls
+                            if p == "/live" or (p == "/videos" and params.get("status") == "past")))
+        sho = json.loads(self.read("radar", f"{SHO}.json"))
+        self.assertEqual([a["id"] for a in sho["upcoming"] + sho["past"]], ["p2"])   # サムネだけの2本は他枠に出ない
+        today = json.loads(self.read("radar", "today.json"))
+        self.assertEqual(next(x for x in today["items"] if x["id"] == "up1")["cast"], [])
+        self.assertNotIn("description", json.loads(self.read("state.json"))["videos"]["up1"])   # 概要欄は残さない
 
     def test_old_ics_outputs_are_removed(self):
         # カレンダー（ICS）の出力はやめたので、前回までの ics/ が残っていたら消す（公開し続けないため）

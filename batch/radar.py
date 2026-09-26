@@ -29,6 +29,7 @@ import os
 import re
 import shutil
 import sys
+import unicodedata
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
@@ -74,7 +75,72 @@ BRANCH_GROUPS = {"本家": "jp", "旧KR": "jp", "旧ID": "jp", "EN": "en"}
 SHORT_SECONDS = 120          # これ以下の長さの投稿はショートとみなす（1〜2分の告知や切り抜きも入る）
 SHORT_TAGGED_SECONDS = 180   # 題名にハッシュタグ（#）があれば、ここまでをショートとみなす（YouTube のショートは3分まで）
 LEGACY_LIVE_SECONDS = 600    # 開始時刻を取っていない古いデータは、これより長ければ配信とみなす
-STATE_SCHEMA = 2             # 2：過去分も live_info（開始時刻）付きで取る。古い状態なら過去 BACKFILL_DAYS 日を取り直す
+STATE_SCHEMA = 3             # 2：過去分も live_info（開始時刻）付きで取る。3：概要欄で、サムネなどのクレジットにだけ名前がある人を出演から外す。
+                             # 古い状態なら、過去 BACKFILL_DAYS 日を取り直し、それより前も古い分のさかのぼりで取り直す
+
+# ---------- 出演の見分け ----------
+# Holodex の mentions（関係するチャンネル）は、概要欄の @ハンドルやチャンネルのリンクから自動で拾われる。そのため
+# 「サムネは毎度おなじみ @〇〇」のように、制作のクレジットにだけ名前があるライバーまで出演になる。これを出演に数えない（2026-09-26）。
+# 本当の共演者を消さないよう厳しめにし、題名にも、概要欄のクレジット以外の所にも名前が無いときだけ外す
+CREDIT_WORDS = (r"サムネ(?:イル)?|thumbnails?|thumb|イラスト(?:レーター)?|illust(?:rations?|rator)?|絵師|作画|立ち絵|"
+                r"デザイン|designs?|designer|designed|ロゴ|logos?|動画編集|編集|edit(?:or|ing|ed)?|mix(?:ing|ed)?|mastering|"
+                r"マスタリング|作曲|作詞|編曲|compose[rd]?|lyrics?|arrange(?:ment|r|d)?|bgm|音源|music|live2d|モデリング|"
+                r"modeling|rigging|素材|背景|art(?:work)?|credits?|クレジット")
+# 「サムネ：」「サムネは〜」「Thumbnail by」「【イラスト】」のような、クレジットの書き方
+CREDIT_LABEL = re.compile(rf"(?<![a-z])(?:{CREDIT_WORDS})(?![a-z])(?:イラスト|絵|制作|作成|担当|提供|素材|画像|デザイン)?\s*"
+                          r"(?:[:/|\-‐―→=>\]】」』)]|by(?![a-z])|は|担当|提供|制作|作成)", re.IGNORECASE)
+CREDIT_HEADER = re.compile(rf"^[\W_]*(?:{CREDIT_WORDS})[\W_]*$", re.IGNORECASE)   # 「■サムネ」だけの見出しの行
+# 1行に「サムネ：@a / 出演：@b」と並べる書き方もあるので、区切り（| や / や「〇〇：」の前）で分けて見る
+CLAUSE_SPLIT = re.compile(r"\s*[|｜]\s*|\s+[/／]\s+|\s+(?=[^\s:：@/]{1,15}[:：](?!//))")
+REFERENCE_ONLY = re.compile(r"(?:@|https?://|www\.)")   # @ハンドルやリンクだけの行
+
+
+def norm(text):
+    """照らし合わせ用に、全角・半角、大文字・小文字、空白や「・」「_」「-」などの違いをならす。"""
+    return re.sub(r"[\s・･_\-‐.]", "", unicodedata.normalize("NFKC", text or "").lower())
+
+
+def build_idents(master):
+    """チャンネル → 題名・概要欄でそのライバーを探す手がかり（表示名・Holodex の名前・英語名・X のID・チャンネルID）。
+    YouTube のハンドルは Holodex に無いが、多くは英語名をつなげたもの（@NishizonoChigusa）なので英語名で見つかる"""
+    idents = {}
+    for r in master:
+        names = [r.get("display_name"), r.get("english_name"), r.get("twitter"), r["channel_id"]]
+        names += re.split(r"[/／]", r.get("name_holodex") or "")
+        # 短すぎる名前は、ほかの言葉の中で見つかってしまうので使わない（英数字だけなら4文字、それ以外は2文字から）
+        idents[r["channel_id"]] = {k for k in map(norm, names) if len(k) >= (4 if k.isascii() else 2)}
+    return idents
+
+
+def credit_only(title, description, mentions, idents):
+    """mentions のうち、概要欄のクレジット（サムネ・イラスト・編集・MIX など）にだけ名前があるチャンネル。"""
+    credit, other = [], []
+    after_label = False   # 「サムネは毎度おなじみ」のような行の直後に続く、@ハンドルやリンクだけの行もクレジットとみなす
+    for raw in (description or "").splitlines():
+        line = unicodedata.normalize("NFKC", raw).strip()
+        if not line:
+            after_label = False
+        elif after_label and REFERENCE_ONLY.match(line):
+            credit.append(norm(line))
+        else:
+            after_label = False
+            clauses = [c for c in CLAUSE_SPLIT.split(line) if c]
+            for i, clause in enumerate(clauses):
+                if CREDIT_LABEL.search(clause) or CREDIT_HEADER.match(clause):
+                    credit.append(norm(clause))
+                    after_label = i == len(clauses) - 1 and "@" not in clause and "http" not in clause
+                else:
+                    other.append(norm(clause))
+    title = norm(title)
+    result = set()
+    for cid in mentions:
+        keys = idents.get(cid)
+        if not keys:
+            continue
+        found = lambda texts: any(k in t for t in texts for k in keys)
+        if found(credit) and not found(other) and not found([title]):
+            result.add(cid)
+    return result
 
 
 def now_utc():
@@ -134,9 +200,16 @@ def build_meta(master):
 
 # ---------- 取得 ----------
 
-def slim(v, src):
-    """保存用に必要な項目だけ残す。"""
+def slim(v, src, idents=None, credited=None):
+    """保存用に必要な項目だけ残す。概要欄はクレジットの見分けに使うだけで、残さない。
+    クレジットにだけ名前がある人は mentions から外し、credited に（動画ID・題名・チャンネル）を足す（実行の記録に出す）"""
     ch = v.get("channel") or {}
+    mentions = [m["id"] for m in (v.get("mentions") or []) if m.get("id")]
+    if idents and v.get("description"):
+        dropped = credit_only(v.get("title"), v["description"], mentions, idents)
+        mentions = [m for m in mentions if m not in dropped]
+        if credited is not None:
+            credited.extend((v["id"], v.get("title") or "", cid) for cid in sorted(dropped))
     return {
         "id": v["id"],
         "title": v.get("title") or "",
@@ -149,17 +222,20 @@ def slim(v, src):
         "start_actual": v.get("start_actual"),
         "available_at": v.get("available_at"),
         "duration": v.get("duration") or 0,
-        "mentions": [m["id"] for m in (v.get("mentions") or []) if m.get("id")],
+        "mentions": mentions,
         "src": src,
         "has_live_info": True,   # 開始時刻（live_info）付きで取った。無い古いデータは kind_of で長さから推定する
     }
 
 
-def fetch(state, targets):
+def fetch(state, targets, idents=None):
     """Holodex から取る。1つでも失敗したら HolodexError をそのまま上げる。"""
     now = now_utc()
     # live_info：過去の動画にも開始時刻を付けてもらい、配信と投稿動画を見分ける（/live には最初から付く）
-    common = {"type": "stream", "include": "mentions,live_info"}
+    # description：概要欄で、サムネなどのクレジットにだけ名前がある人を見分ける（呼び出しの回数は増えない。概要欄は残さない）
+    common = {"type": "stream", "include": "mentions,live_info,description"}
+    credited = []
+    keep = lambda videos, src: [slim(v, src, idents, credited) for v in videos]
 
     print("1/3 これからの配信を取得中…", flush=True)
     live = holodex.get_all("/live", {**common, "org": ORG, "max_upcoming_hours": UPCOMING_HOURS}, max_pages=10)
@@ -209,17 +285,18 @@ def fetch(state, targets):
     collabs = []
     for cid in turn:
         collabs.extend(holodex.as_list(holodex.get(f"/channels/{cid}/collabs",
-                                                   {"include": "mentions,live_info", "limit": 25})))
+                                                   {"include": common["include"], "limit": 25})))
 
     # 上限で打ち切ったときは、取れたところまでを記録して次の回に続きを取る
     truncated = len(past) >= PAST_MAX_PAGES * holodex.PAGE
     past_until = (past[-1].get("available_at") or iso(now)) if truncated else iso(now)
 
     return {
-        "live": [slim(v, "org") for v in live],
-        "past": [slim(v, "org") for v in past],
-        "older": [slim(v, "org") for v in older],
-        "collabs": [slim(v, "collab") for v in collabs],
+        "live": keep(live, "org"),
+        "past": keep(past, "org"),
+        "older": keep(older, "org"),
+        "collabs": keep(collabs, "collab"),
+        "credited": credited,
         "fetched_at": iso(now),
         "past_until": past_until,
         "past_from": iso(past_from),
@@ -490,7 +567,7 @@ def main():
         sys.exit("対象のライバーがいません（マスターの branch・channel_type・inactive を確認してください）")
     state = load_state()
     try:
-        got = fetch(state, targets)
+        got = fetch(state, targets, build_idents(master))
     except holodex.HolodexError as e:
         print(f"Holodex からの取得に失敗しました。前回のデータをそのまま残します：{e}", file=sys.stderr)
         sys.exit(1)
@@ -518,6 +595,11 @@ def main():
           f"過去分は {new_state['past_from'][:10]} から / 出力先 {OUT_DIR}")
     if new_state["last_past_fetch"] != new_state["updated_at"]:
         print("過去の配信は上限で止めました。もう一度実行すると続きから取ります。")
+    # 外しすぎていないかをあとで確かめられるよう、出演から外した件数と例を記録に出す（対象のライバーの分だけ）
+    credited = [c for c in dict.fromkeys(map(tuple, got.get("credited", []))) if c[2] in targets]   # 重なって取った回は1件に
+    if credited:
+        examples = " / ".join(f"{names.get(cid, cid)}｜{title[:30]}（{vid}）" for vid, title, cid in credited[:5])
+        print(f"概要欄のクレジット（サムネなど）にだけ名前があったので、出演から外しました：{len(credited)} 件。例：{examples}")
 
 
 if __name__ == "__main__":
