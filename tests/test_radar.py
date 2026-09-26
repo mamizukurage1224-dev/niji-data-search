@@ -155,6 +155,13 @@ class RadarTest(unittest.TestCase):
         kinds = {a["id"]: a["kind"] for a in sho["own_upcoming"] + sho["own_past"]}
         self.assertEqual(kinds, {"up": "live", "stream": "live", "mv": "video", "s100": "short",
                                  "s150": "short", "v150": "video"})
+        # Holodex の分類があれば、長さより分類を使う
+        upload = {"status": "past", "start_actual": None, "title": "告知PV", "has_live_info": True}
+        self.assertEqual(radar.kind_of(dict(upload, topic_id="shorts", duration=170)), "short")   # 3分近くてもショート
+        self.assertEqual(radar.kind_of(dict(upload, topic_id="talk", duration=69)), "video")      # 短くても別の分類なら動画
+        self.assertEqual(radar.kind_of(dict(upload, topic_id=None, duration=69)), "short")        # 分類が無ければ長さで
+        self.assertEqual(radar.kind_of(dict(upload, topic_id="shorts", duration=47, start_actual="2026-09-26T00:00:00Z")),
+                         "live")                                                                  # #shorts の縦型の生配信は配信
         # 開始時刻を取っていない古いデータは、長さで配信か動画かを推定する
         legacy = {"status": "past", "start_actual": None, "title": "", "duration": 3600}
         self.assertEqual(radar.kind_of(legacy), "live")

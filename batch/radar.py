@@ -286,13 +286,19 @@ def merge(state, got):
 # ---------- 出力 ----------
 
 def kind_of(v):
-    """配信（live）・動画（video）・ショート（short）を推定する。
-    開始時刻があるものは配信（プレミア公開も開始時刻を持つので、ここでは配信に入る）。"""
+    """配信（live）・動画（video）・ショート（short）を見分ける。
+    開始時刻があるものは配信（プレミア公開や、#shorts 付きの縦型の生配信も開始時刻を持つので、ここでは配信に入る）。
+    投稿動画は、Holodex の分類（topic_id）が shorts ならショート、ほかの分類があればショートにしない（1〜2分の告知 PV など）。
+    分類が無いときだけ、長さと題名で推定する（2026-09-26：約2万本で、長さだけの推定は 24本のショートを動画に、
+    128本の告知 PV などをショートにしていた）"""
     duration = v.get("duration") or 0
+    topic = v.get("topic_id")
     if v["status"] in ("upcoming", "live") or v.get("start_actual"):
         return "live"
-    if 0 < duration <= SHORT_SECONDS or (
-            duration <= SHORT_TAGGED_SECONDS and re.search(r"[#＃]\S", v.get("title") or "")):
+    if topic == "shorts":
+        return "short"
+    if not topic and (0 < duration <= SHORT_SECONDS or (
+            duration <= SHORT_TAGGED_SECONDS and re.search(r"[#＃]\S", v.get("title") or ""))):
         return "short"
     if not v.get("has_live_info") and duration > LEGACY_LIVE_SECONDS:
         return "live"

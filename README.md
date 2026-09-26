@@ -15,17 +15,17 @@ ANYCOLOR株式会社およびにじさんじ公式とは関係ありません。
 - `.github/workflows/radar.yml` … 15分ごと（毎時7・22・37・52分。Cloudflare の Worker が workflow_dispatch で起こす）に実行し、出力を `gh-pages` ブランチに置く。他事務所の枠の補いと古い分のさかのぼりは30分に1回（`HEAVY_EVERY_MINUTES`）
 - `.github/workflows/watchdog.yml` … 6時間ごとに公開中のデータの鮮度を確かめ、3時間より古ければ Issue「データの更新が止まっています」で知らせる（戻ったら閉じる）
 - `.github/workflows/master.yml`・`batch/master_tool.py` … 「ライバー一覧を直す」。GitHub の画面の欄を埋めて、新人の追加・卒業・表示名や読みや色の修正をする
-- `livers_master.csv` … ライバーマスター（バッチが読む正本。2026-09-26 に決定）。新人の追加・卒業はここを直す（own_rules のような非公開のメモは置かない）。リポジトリ変数 `MASTER_CSV_URL` を設定した場合だけ、そちらの CSV を使う
+- `livers_master.csv` … ライバー一覧（ライバーマスター。バッチが読む正本。2026-09-26 に決定）。新人の追加・卒業はここを直す（own_rules のような非公開のメモは置かない）。リポジトリ変数 `MASTER_CSV_URL` を設定した場合だけ、そちらの CSV を使う
 
 ## 出力（GitHub Pages）
 
 - `radar/index.json` … 最終更新時刻と、ライバーごとの読み・グループ（`jp`：にじさんじ〔本家・旧KR・旧ID〕／`en`：NIJISANJI EN）・色（マスターの `color` 列。`#RRGGBB` のみ）・件数（他枠・自枠）・次の他枠出演
-- `radar/{channel_id}.json` … ライバー別の他枠出演（`upcoming`／`past`）と自枠（`own_upcoming`／`own_past`）。過去は直近35日分（`recent_from` 以降）。各項目の `kind` は 配信（`live`）・動画（`video`）・ショート（`short`）の推定（Holodex に区別が無いため、開始時刻と長さ・題名から推定）
+- `radar/{channel_id}.json` … ライバー別の他枠出演（`upcoming`／`past`）と自枠（`own_upcoming`／`own_past`）。過去は直近35日分（`recent_from` 以降）。各項目の `kind` は 配信（`live`）・動画（`video`）・ショート（`short`）（開始時刻があれば配信。投稿動画は Holodex の分類 `topic_id` が shorts ならショート、ほかの分類があれば動画、分類が無いときだけ長さと題名で推定）
 - `radar/archive/{channel_id}.json` … それより前、180日前までの過去（`past`／`own_past`）。画面で3か月・6か月などを選んだときだけ読む（取っていない古い分は、毎回1000本ずつさかのぼって取る）
 - `radar/today.json` … 対象のライバー全員の、配信中と今日・明日（日本時間）の配信予定（画面の「にじさんじ全体」）。`cast` はその枠に出る対象のライバー
 - `state.json` … 次回の差分取得に使う状態
 
-1日1回、Holodex のにじさんじのチャンネル一覧とマスターを比べ、マスターに無いチャンネル（新人など）や活動を終えたらしいチャンネルがあれば、Issue（「ライバーマスターの見直しが必要なチャンネルがあります」）で知らせます。
+1日1回、Holodex のにじさんじのチャンネル一覧とライバー一覧を比べ、ライバー一覧に無いチャンネル（新人など）や活動を終えたらしいチャンネルがあれば、Issue（「ライバー一覧の見直しが必要なチャンネルがあります」）で知らせます。
 
 非公開・削除になった動画（Holodex で status=missing）は、1日1回まとめて確かめて一覧から外します。状態に残すのは190日分です。
 YouTube の配信・動画だけが対象です（Twitch などは対象外）。メンバー限定配信も対象外です（Holodex の分類に加えて、題名に「メン限」「メンバー限定」「Members only」などがある回も除く）。取得に失敗したときは、前回のデータをそのまま出し続けます。
