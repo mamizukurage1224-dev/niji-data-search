@@ -445,14 +445,20 @@ def write_channel_report(check):
         return "\n".join(["| 名前 | 英語名 | グループ | チャンネル |", "|---|---|---|---|"] + [
             f"| {cell(c.get('name'))} | {cell(c.get('english_name'))} | {cell(c.get('group'))} | "
             f"[{c['id']}](https://www.youtube.com/channel/{c['id']}) |" for c in rows])
-    parts = [f"Holodex のにじさんじのチャンネル一覧と、ライバーマスターを比べた結果です（{check['checked_at'][:10]}）。"
-             "マスターを直すと、サイトに反映されます。"]
+    parts = [f"Holodex のにじさんじのチャンネル一覧と、ライバー一覧（livers_master.csv）を比べた結果です（{check['checked_at'][:10]}）。"
+             "ライバー一覧を直すと、サイトに反映されます。"]
     if check["new"]:
-        parts += ["## マスターに無いチャンネル（新人・新しいユニットなど）", table(check["new"])]
+        parts += ["## ライバー一覧に無いチャンネル（新人・新しいユニットなど）", table(check["new"])]
     if check["ended"]:
-        parts += ["## 活動を終えたらしいチャンネル（Holodex では活動終了、マスターでは現役）", table(check["ended"])]
-    parts.append("直し方：手元で `nijisanji_check.py` → `build_master.py` を実行して livers_master.csv を作り直し、"
-                 "niji-data-search にも写す（own_rules 列は除く）。MASTER_CSV_URL を使っているならスプレッドシートも直す。")
+        parts += ["## 活動を終えたらしいチャンネル（Holodex では活動終了、ライバー一覧では現役）", table(check["ended"])]
+    repo = "https://github.com/mamizukurage1224-dev/niji-data-search"
+    parts += ["## すること", "\n".join([
+        f"- **新人**：[ライバー一覧を直す]({repo}/actions/workflows/master.yml) を開き、「Run workflow」→「新人を追加する」を選んで、"
+        "チャンネルID（上の表からコピー）・グループ・表示名・読みを入れて実行します。"
+        "ライバーカラーは分かれば入れます（あとからでも入れられます）。15分以内にサイトに出ます。",
+        "- **卒業・活動終了**：同じ画面で「卒業・活動終了にする」を選び、チャンネルIDを入れて実行します。",
+        "- **ライバー本人ではないチャンネル**（ユニット・公式・切り抜きなど）：何もしなくてかまいません。",
+    ]), f"終わったら、この Issue を閉じてください。詳しくは [運用ガイド]({repo}/blob/main/OPERATIONS.md) を見てください。"]
     with open(CHANNEL_REPORT, "w", encoding="utf-8") as f:
         f.write("\n\n".join(parts) + "\n")
 

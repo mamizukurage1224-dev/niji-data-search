@@ -1,0 +1,83 @@
+# ライバー一覧（livers_master.csv）を、GitHub の画面から直す。
+# Actions →「ライバー一覧を直す」→「Run workflow」で、欄を埋めて実行する（手元での作業は要らない）。
+# 直した一覧は main に保存され、次の radar（15分以内）からサイトに出る。やり方は OPERATIONS.md。
+name: ライバー一覧を直す
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "すること"
+        type: choice
+        options:
+          - 新人を追加する
+          - 卒業・活動終了にする
+          - 表示名・読み・色を直す
+      channel_id:
+        description: "チャンネルID（UC から始まる24文字。知らせ〔Issue〕の表からコピー）"
+        required: true
+        type: string
+      group:
+        description: "グループ（新人を追加するとき）"
+        type: choice
+        options:
+          - にじさんじ
+          - NIJISANJI EN
+      name:
+        description: "表示名（例：星導ショウ。追加のとき空なら Holodex の名前を使う）"
+        required: false
+        type: string
+      kana:
+        description: "読み（例：ほしるべしょう。にじさんじのライバーを追加するときは必ず）"
+        required: false
+        type: string
+      alias:
+        description: "名前だけの読み（任意。例：しょう）"
+        required: false
+        type: string
+      color:
+        description: "ライバーカラー（任意。# から始まる6桁。例：#A58CDC）"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: master
+  cancel-in-progress: false
+
+jobs:
+  edit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # 入力はそのまま命令に埋め込まず、環境変数で渡す（おかしな文字が入っても命令として動かないように）
+      - name: Edit livers_master.csv
+        env:
+          HOLODEX_API_KEY: ${{ secrets.HOLODEX_API_KEY }}
+          ACTION: ${{ inputs.action }}
+          CHANNEL_ID: ${{ inputs.channel_id }}
+          GROUP: ${{ inputs.group }}
+          NAME: ${{ inputs.name }}
+          KANA: ${{ inputs.kana }}
+          ALIAS: ${{ inputs.alias }}
+          COLOR: ${{ inputs.color }}
+        run: python batch/master_tool.py --from-env
+
+      - name: Save to main
+        run: |
+          if git diff --quiet -- livers_master.csv; then
+            echo "変更はありませんでした。"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit -q -m "$(cat commit_message.txt)" -- livers_master.csv
+          git push -q origin HEAD:main

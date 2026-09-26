@@ -7,11 +7,14 @@ ANYCOLOR株式会社およびにじさんじ公式とは関係ありません。
 利用は [Holodex API License](https://docs.holodex.net/#section/LICENSE) に従い、同ライセンスの免責
 （API とデータは現状のまま提供され、正確性を含め一切保証されない）が適用されます。
 
+**運用の手順は [OPERATIONS.md](OPERATIONS.md)（運用ガイド）** にまとめています。新人の追加・卒業は、Actions の「ライバー一覧を直す」から画面で行えます。
+
 ## 中身
 
 - `batch/radar.py` … 配信の一覧（自枠・他枠）のデータを作るバッチ（`batch/holodex.py` が API の呼び出し）
 - `.github/workflows/radar.yml` … 15分ごと（毎時7・22・37・52分。Cloudflare の Worker が workflow_dispatch で起こす）に実行し、出力を `gh-pages` ブランチに置く。他事務所の枠の補いと古い分のさかのぼりは30分に1回（`HEAVY_EVERY_MINUTES`）
 - `.github/workflows/watchdog.yml` … 6時間ごとに公開中のデータの鮮度を確かめ、3時間より古ければ Issue「データの更新が止まっています」で知らせる（戻ったら閉じる）
+- `.github/workflows/master.yml`・`batch/master_tool.py` … 「ライバー一覧を直す」。GitHub の画面の欄を埋めて、新人の追加・卒業・表示名や読みや色の修正をする
 - `livers_master.csv` … ライバーマスター（バッチが読む正本。2026-09-26 に決定）。新人の追加・卒業はここを直す（own_rules のような非公開のメモは置かない）。リポジトリ変数 `MASTER_CSV_URL` を設定した場合だけ、そちらの CSV を使う
 
 ## 出力（GitHub Pages）

@@ -38,7 +38,7 @@ jobs:
           - Cloudflare の起こし役（niji-data-trigger）の Secret GITHUB_TOKEN の期限切れ → Cloudflare の niji-data-trigger のログ（Observability）。期限切れなら GitHub でトークンを作り直して入れ替える
           - radar の失敗（Holodex の不調など）→ Actions の radar の実行履歴
 
-          更新が戻ると、この Issue は自動で閉じます。"
+          直し方は運用ガイド（https://github.com/mamizukurage1224-dev/niji-data-search/blob/main/OPERATIONS.md）の「データの更新が止まっています」を見てください。更新が戻ると、この Issue は自動で閉じます。"
             fi
             exit 1
           elif [ -n "$num" ]; then
