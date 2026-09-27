@@ -12,7 +12,7 @@ ANYCOLOR株式会社およびにじさんじ公式とは関係ありません。
 ## 中身
 
 - `batch/radar.py` … 配信の一覧（自枠・他枠）のデータを作るバッチ（`batch/holodex.py` が API の呼び出し）
-- `.github/workflows/radar.yml` … 15分ごと（毎時7・22・37・52分。Cloudflare の Worker が workflow_dispatch で起こす）に実行し、出力を `gh-pages` ブランチに置く。他事務所の枠の補いと古い分のさかのぼりは30分に1回（`HEAVY_EVERY_MINUTES`）
+- `.github/workflows/radar.yml` … 15分ごと（毎時7・22・37・52分。Cloudflare の Worker が workflow_dispatch で起こす）に実行し、出力を `gh-pages` ブランチに置く。他事務所の枠の補いと古い分のさかのぼりは30分に1回（`HEAVY_EVERY_MINUTES`）。他事務所の枠は、ふだんは1人ずつ最近の25本を順番に見て回り、まだの人は画面に出す期間（180日）の始めまでページをめくってさかのぼる（1回に6人。済んだ人は state の `collab_deep_done`）
 - `.github/workflows/watchdog.yml` … 6時間ごとに公開中のデータの鮮度を確かめ、3時間より古ければ Issue「データの更新が止まっています」で知らせる（戻ったら閉じる）
 - `.github/workflows/master.yml`・`batch/master_tool.py` … 「ライバー一覧を直す」。GitHub の画面の欄を埋めて、新人の追加・卒業・表示名や読みや色の修正をする
 - `livers_master.csv` … ライバー一覧（ライバーマスター。バッチが読む正本。2026-09-26 に決定）。新人の追加・卒業はここを直す（own_rules のような非公開のメモは置かない）。リポジトリ変数 `MASTER_CSV_URL` を設定した場合だけ、そちらの CSV を使う

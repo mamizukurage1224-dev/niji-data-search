@@ -268,6 +268,35 @@ class RadarTest(unittest.TestCase):
         self.run_batch(DatedHolodex(past=[dict(video("lost2", SHO, [], status="past", hours=-20), duration=10 * 3600)]))
         self.assertNotIn("lost2", json.loads(self.read("state.json"))["videos"])   # 2回目からはさかのぼらない
 
+    def test_other_agency_appearances_are_backfilled_once(self):
+        # 他事務所の枠は「最近の25本」の取得だけだと古い出演が欠けるので、1人ずつ画面に出す期間の始めまでページをめくる
+        old = [video(f"x{i}", "UCother_org", [SHO], hours=-36 * (i + 1)) for i in range(120)]   # 約180日ぶん
+
+        class Paged(FakeHolodex):
+            def get(self, path, params=None, retries=3):
+                if path.endswith("/collabs"):
+                    p = params or {}
+                    mine = [v for v in self.collabs if path.split("/")[2] in [m["id"] for m in v["mentions"]]]
+                    offset, limit = p.get("offset", 0), p.get("limit", 25)
+                    return mine[offset:offset + limit]
+                return super().get(path, params, retries)
+
+        calls = []
+        fake = Paged(collabs=old)
+        get = lambda p, params=None, retries=3: calls.append((p, params or {})) or fake.get(p, params)
+        with mock.patch.object(holodex, "get", get):
+            radar.main()
+        sho = json.loads(self.read("radar", f"{SHO}.json"))
+        archive = json.loads(self.read("radar", "archive", f"{SHO}.json"))
+        got = {a["id"] for a in sho["past"] + archive["past"]}
+        self.assertIn("x100", got)   # 150日前の出演も入る（最近の25本より前）
+        self.assertGreater(len(got), 100)
+        self.assertIn(SHO, json.loads(self.read("state.json"))["collab_deep_done"])
+        calls.clear()
+        with mock.patch.object(holodex, "get", get):
+            radar.main()
+        self.assertFalse([params for p, params in calls if p.endswith("/collabs") and params.get("offset")])   # 済んだ人はもうめくらない
+
     def test_older_past_is_backfilled_step_by_step(self):
         # 1日1本、1〜150日前と、画面に出す期間より前（200日前）
         past = [video(f"d{d}", KAGETSU, [SHO], hours=-24 * d - 1) for d in [*range(1, 151), 200]]

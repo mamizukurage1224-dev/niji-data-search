@@ -48,7 +48,9 @@ PAST_FIX = 1              # 1：長い配信が落ちていた不具合（2026-0
 PAST_FIX_HOURS = 48
 PAST_MAX_PAGES = 40       # 1回の過去分取得のページ上限（50件×40）
 OLDER_MAX_PAGES = 20      # 取っていない古い分を、1回にさかのぼるページ上限（50件×20。Holodex への負荷を抑えて少しずつ）
-COLLAB_PER_RUN = 8        # 他事務所の枠を補うライバー数（1回あたり、順番に回す）
+COLLAB_PER_RUN = 8        # 他事務所の枠を補うライバー数（1回あたり、順番に回す。最近の25本）
+COLLAB_DEEP_PER_RUN = 6   # 他事務所の枠を画面に出す期間の始めまでさかのぼるライバー数（重い取得の回ごと。約220人なので1日弱で終わる）
+COLLAB_DEEP_MAX_PAGES = 8 # 1人あたりのページ上限（50件×8。にじさんじ内の枠も混ざるので多めに）
 HEAVY_EVERY_MINUTES = 25  # 他事務所の枠の補いと古い分のさかのぼりは、前回からこれだけたったときだけ行う
                           # （実行は15分おき。これからの配信と新しい過去分は毎回、重い取得は30分に1回にして Holodex への負荷を抑える）
 KEEP_DAYS = 190           # 状態に残す日数（画面に出すのは PAST_SHOW_DAYS まで。余分に持つと state.json が膨らむだけなので少しの余裕だけ）
@@ -303,6 +305,24 @@ def fetch(state, targets, idents=None):
         collabs.extend(holodex.as_list(holodex.get(f"/channels/{cid}/collabs",
                                                    {"include": common["include"], "limit": 25})))
 
+    # 上の順番の取得は「最近の25本」だけなので、それより前の出演は取れていなかった（2026-09-27 に発見。180日で32本だけだった）。
+    # まだ済んでいないライバーを数人ずつ、画面に出す期間（PAST_SHOW_DAYS）の始めまでページをめくってさかのぼる。
+    # 済んだ人は state の collab_deep_done に残し、あとから加わった新人も自然に対象になる
+    deep_done = set(state.get("collab_deep_done") or [])
+    deep_turn = [cid for cid in ids if cid not in deep_done][:COLLAB_DEEP_PER_RUN] if heavy else []
+    if deep_turn:
+        left = sum(1 for cid in ids if cid not in deep_done)
+        print(f"   他事務所の枠を {iso(goal)[:10]} までさかのぼって取得中：{len(deep_turn)} 人（残り {left} 人）", flush=True)
+    for cid in deep_turn:
+        for page in range(COLLAB_DEEP_MAX_PAGES):
+            items = holodex.as_list(holodex.get(f"/channels/{cid}/collabs", {"include": common["include"],
+                                                "limit": holodex.PAGE, "offset": page * holodex.PAGE}))
+            collabs.extend(items)
+            oldest = parse_time(items[-1].get("available_at")) if items else None
+            if len(items) < holodex.PAGE or (oldest and oldest < goal):
+                break
+        deep_done.add(cid)
+
     # 上限で打ち切ったときは、取れたところまでを記録して次の回に続きを取る
     truncated = len(past) >= PAST_MAX_PAGES * holodex.PAGE
     past_until = (past[-1].get("available_at") or iso(now)) if truncated else iso(now)
@@ -317,6 +337,7 @@ def fetch(state, targets, idents=None):
         "past_until": past_until,
         "past_from": iso(past_from),
         "collab_cursor": (cursor + len(turn)) % max(len(ids), 1),
+        "collab_deep_done": sorted(deep_done),
         "heavy_at": iso(now) if heavy else state.get("heavy_at"),
         "missing": [v["id"] for v in missing if v.get("id")],
         "missing_checked_at": iso(now) if check_missing else state.get("missing_checked_at"),
@@ -370,6 +391,7 @@ def merge(state, got):
         "past_from": got.get("past_from"),   # にじさんじ全体の過去分を、ここから後はすべて取ってある
         "updated_at": got["fetched_at"],
         "collab_cursor": got["collab_cursor"],
+        "collab_deep_done": got.get("collab_deep_done", []),   # 他事務所の枠を画面に出す期間の始めまでさかのぼり済みのライバー
         "heavy_at": got.get("heavy_at"),   # 他事務所の枠の補いと古い分のさかのぼりを最後に行った時刻
         "missing_checked_at": got.get("missing_checked_at"),   # 非公開・削除になった動画を最後に確かめた時刻
         "schema": STATE_SCHEMA,
