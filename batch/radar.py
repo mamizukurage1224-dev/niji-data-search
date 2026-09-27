@@ -43,6 +43,9 @@ MASTER_LOCAL = "livers_master.csv"
 UPCOMING_HOURS = 168      # これからの配信は1週間先まで
 BACKFILL_DAYS = 30        # 初回に取る過去の日数
 PAST_OVERLAP_HOURS = 6    # 差分取得の重なり（取りこぼし防止）
+ENDED_LOOKBACK_HOURS = 30 # 終わった配信を拾い直すときに、さかのぼる上限（24時間を超える常時配信は、別に捨てている）
+PAST_FIX = 1              # 1：長い配信が落ちていた不具合（2026-09-27）の直し。古い状態なら PAST_FIX_HOURS さかのぼって拾い直す
+PAST_FIX_HOURS = 48
 PAST_MAX_PAGES = 40       # 1回の過去分取得のページ上限（50件×40）
 OLDER_MAX_PAGES = 20      # 取っていない古い分を、1回にさかのぼるページ上限（50件×20。Holodex への負荷を抑えて少しずつ）
 COLLAB_PER_RUN = 8        # 他事務所の枠を補うライバー数（1回あたり、順番に回す）
@@ -243,6 +246,19 @@ def fetch(state, targets, idents=None):
     # 状態が古い形式なら、過去 BACKFILL_DAYS 日を開始時刻付きで取り直す（上限で止まったら次の回に続きから）
     last = parse_time(state.get("last_past_fetch")) if state.get("schema", 1) >= STATE_SCHEMA else None
     since = (last - timedelta(hours=PAST_OVERLAP_HOURS)) if last else (now - timedelta(days=BACKFILL_DAYS))
+    if last:
+        # 前回は配信中で、今回 /live に無い（終わった）枠は、開始時刻のところから取り直す。過去分は開始時刻で絞るので、
+        # 重なり（PAST_OVERLAP_HOURS）より長い配信は、終わったときに範囲の外になって消えていた（2026-09-27 に発見。
+        # それまでは 6時間以上の配信が、終わると一覧から落ちていた）
+        live_ids = {v["id"] for v in live}
+        ended = [parse_time(v["start_actual"] or v["available_at"]) for v in (state.get("videos") or {}).values()
+                 if v["status"] == "live" and v["src"] == "org" and v["id"] not in live_ids
+                 and (v["start_actual"] or v["available_at"])]
+        if ended:
+            since = min(since, max(min(ended) - timedelta(minutes=10), now - timedelta(hours=ENDED_LOOKBACK_HOURS)))
+        # この直しより前に落ちた長い配信を、1回だけさかのぼって拾い直す
+        if state.get("past_fix", 0) < PAST_FIX:
+            since = min(since, now - timedelta(hours=PAST_FIX_HOURS))
     print(f"2/3 {iso(since)[:16]} 以降の過去の配信を取得中（最大{PAST_MAX_PAGES * holodex.PAGE}本）…", flush=True)
     past = holodex.get_all("/videos", {**common, "org": ORG, "status": "past", "from": iso(since),
                                        "sort": "available_at", "order": "asc"}, max_pages=PAST_MAX_PAGES)
@@ -357,6 +373,7 @@ def merge(state, got):
         "heavy_at": got.get("heavy_at"),   # 他事務所の枠の補いと古い分のさかのぼりを最後に行った時刻
         "missing_checked_at": got.get("missing_checked_at"),   # 非公開・削除になった動画を最後に確かめた時刻
         "schema": STATE_SCHEMA,
+        "past_fix": PAST_FIX,   # 長い配信を拾い直すさかのぼりを済ませた（fetch で1回だけ行う）
     }
 
 

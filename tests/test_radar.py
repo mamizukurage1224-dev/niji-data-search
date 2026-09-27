@@ -239,6 +239,35 @@ class RadarTest(unittest.TestCase):
         self.assertEqual(state["last_past_fetch"], past[99]["available_at"])   # 100件目までで止めた
         self.assertNotEqual(state["last_past_fetch"], state["updated_at"])
 
+    def test_long_stream_is_kept_after_it_ends(self):
+        # 8時間前に始まって配信中だった枠が終わったとき、開始時刻が差分の重なり（6時間）より前でも取り直して残す
+        self.run_batch(DatedHolodex(live=[video("long", SHO, [], status="live", hours=-8)]))
+        self.assertIn("long", json.loads(self.read("state.json"))["videos"])
+        ended = dict(video("long", SHO, [], status="past", hours=-8), duration=8 * 3600)
+        calls = []
+        fake = DatedHolodex(live=[], past=[ended])
+        with mock.patch.object(holodex, "get", lambda p, params=None, retries=3: calls.append((p, params)) or fake.get(p, params)):
+            radar.main()
+        sho = json.loads(self.read("radar", f"{SHO}.json"))
+        self.assertEqual([a["id"] for a in sho["own_past"]], ["long"])
+        since = radar.parse_time(next(params["from"] for p, params in calls if p == "/videos" and params.get("status") == "past"
+                                      and params.get("order") == "asc"))
+        self.assertLess(since, radar.now_utc() - timedelta(hours=8))   # 開始のところまでさかのぼった
+
+    def test_streams_lost_before_the_fix_are_picked_up_once(self):
+        # 直す前の状態（past_fix が無い）なら、1回だけ PAST_FIX_HOURS さかのぼって、落ちていた長い配信を拾い直す
+        self.run_batch(DatedHolodex())
+        state = json.loads(self.read("state.json"))
+        self.assertEqual(state["past_fix"], radar.PAST_FIX)
+        state.pop("past_fix")
+        with open(os.path.join(self.tmp.name, "state.json"), "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        lost = dict(video("lost", SHO, [], status="past", hours=-20), duration=10 * 3600)
+        self.run_batch(DatedHolodex(past=[lost]))
+        self.assertEqual([a["id"] for a in json.loads(self.read("radar", f"{SHO}.json"))["own_past"]], ["lost"])
+        self.run_batch(DatedHolodex(past=[dict(video("lost2", SHO, [], status="past", hours=-20), duration=10 * 3600)]))
+        self.assertNotIn("lost2", json.loads(self.read("state.json"))["videos"])   # 2回目からはさかのぼらない
+
     def test_older_past_is_backfilled_step_by_step(self):
         # 1日1本、1〜150日前と、画面に出す期間より前（200日前）
         past = [video(f"d{d}", KAGETSU, [SHO], hours=-24 * d - 1) for d in [*range(1, 151), 200]]
