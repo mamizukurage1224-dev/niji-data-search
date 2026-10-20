@@ -57,6 +57,8 @@ KEEP_DAYS = 190           # 状態に残す日数（画面に出すのは PAST_S
 PAST_SHOW_DAYS = 180      # JSONに載せる過去の日数
 MISSING_CHECK_HOURS = 24  # 非公開・削除になった動画（Holodex の status=missing）を確かめる間隔
 MISSING_MAX_PAGES = 10    # 1回に確かめる上限（50件×10。新しいほうから）
+MISSING_RECENT_DAYS = 3   # 新しい動画は、重い取得の回ごと（30分に1回）にも確かめる。投稿してすぐ消し、上げ直した動画が
+                          # 1日近く並んで残らないように（呼び出しは1回。2026-10-20）
 RECENT_DAYS = 35          # ライバー別JSONに入れる直近の過去の日数。それより前は archive/ に分ける（画面が3か月・6か月のときだけ読む）
 STALE_UPCOMING_HOURS = 12 # 予定時刻を過ぎても配信にならない予定を捨てるまでの時間
 ALWAYS_ON_HOURS = 24      # 開始からこの時間を過ぎても配信中のものは常時配信とみなして捨てる
@@ -284,7 +286,8 @@ def fetch(state, targets, idents=None):
         past_from = (parse_time(older[-1].get("available_at")) or goal
                      if len(older) >= OLDER_MAX_PAGES * holodex.PAGE else goal)
 
-    # 非公開・削除になった動画は、Holodex が status=missing にする。画面に出す期間のぶんを1日1回まとめて取り、一覧から外す
+    # 非公開・削除になった動画は、Holodex が status=missing にする。画面に出す期間のぶんを1日1回まとめて取り、一覧から外す。
+    # 直近の分は重い取得の回ごとにも確かめる
     # （1本ずつ確かめるより呼び出しがずっと少ない）
     missing_at = parse_time(state.get("missing_checked_at"))
     check_missing = heavy and (not missing_at or now - missing_at >= timedelta(hours=MISSING_CHECK_HOURS))
@@ -293,6 +296,10 @@ def fetch(state, targets, idents=None):
         print("   非公開・削除になった動画を確かめています…", flush=True)
         missing = holodex.get_all("/videos", {"type": "stream", "org": ORG, "status": "missing", "from": iso(goal),
                                               "sort": "available_at", "order": "desc"}, max_pages=MISSING_MAX_PAGES)
+    elif heavy:
+        missing = holodex.get_all("/videos", {"type": "stream", "org": ORG, "status": "missing",
+                                              "from": iso(now - timedelta(days=MISSING_RECENT_DAYS)),
+                                              "sort": "available_at", "order": "desc"}, max_pages=1)
 
     # 他事務所の枠への出演は、ライバー別の collabs を少しずつ順番に取って補う
     ids = sorted(targets)

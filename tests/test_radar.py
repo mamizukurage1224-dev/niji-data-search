@@ -455,6 +455,25 @@ class RadarTest(unittest.TestCase):
         self.run_batch(FakeHolodex(missing=[dict(video("gone", SHO, []), status="missing")]))
         self.assertEqual([a["id"] for a in json.loads(self.read("radar", f"{SHO}.json"))["own_past"]], ["keep"])
 
+    def test_recent_missing_videos_are_dropped_soon(self):
+        # 投稿してすぐ消した動画は、1日1回の確かめを待たず、次の重い取得の回（30分に1回）で外す
+        self.run_batch(FakeHolodex(past=[video("keep", SHO, []), video("gone", SHO, [])]))
+        state = json.loads(self.read("state.json"))
+        state["heavy_at"] = radar.iso(radar.now_utc() - timedelta(minutes=30))
+        checked = state["missing_checked_at"] = radar.iso(radar.now_utc() - timedelta(hours=1))   # 1日1回の確かめはまだ
+        with open(os.path.join(self.tmp.name, "state.json"), "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        fake = FakeHolodex(missing=[dict(video("gone", SHO, []), status="missing")])
+        calls = []
+        get = fake.get
+        fake.get = lambda path, params=None, retries=3: (calls.append(dict(params or {})), get(path, params, retries))[1]
+        self.run_batch(fake)
+        self.assertEqual([a["id"] for a in json.loads(self.read("radar", f"{SHO}.json"))["own_past"]], ["keep"])
+        recent = [p for p in calls if p.get("status") == "missing"]
+        self.assertEqual(len(recent), 1)   # 直近の分を1ページだけ
+        self.assertGreater(recent[0]["from"], radar.iso(radar.now_utc() - timedelta(days=4)))
+        self.assertEqual(json.loads(self.read("state.json"))["missing_checked_at"], checked)   # 1日1回の時刻は進めない
+
     def test_credit_only_names(self):
         idents = radar.build_idents(MASTER)
         f = lambda desc, title="雑談": radar.credit_only(title, desc, [SHO], idents)
