@@ -474,6 +474,12 @@ class RadarTest(unittest.TestCase):
         self.assertGreater(recent[0]["from"], radar.iso(radar.now_utc() - timedelta(days=4)))
         self.assertEqual(json.loads(self.read("state.json"))["missing_checked_at"], checked)   # 1日1回の時刻は進めない
 
+    def test_entries_carry_topic(self):
+        # 画面が同じ企画の別視点をまとめるときに使うので、Holodex の分類（ゲーム名など）を各回に載せる
+        self.run_batch(FakeHolodex(past=[video("ow", SHO, [], topic="Overwatch"), video("none", SHO, [], hours=-30)]))
+        got = {a["id"]: a.get("topic") for a in json.loads(self.read("radar", f"{SHO}.json"))["own_past"]}
+        self.assertEqual(got, {"ow": "Overwatch", "none": None})
+
     def test_credit_only_names(self):
         idents = radar.build_idents(MASTER)
         f = lambda desc, title="雑談": radar.credit_only(title, desc, [SHO], idents)

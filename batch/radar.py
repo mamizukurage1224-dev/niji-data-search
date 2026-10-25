@@ -441,6 +441,8 @@ def entry(v, owner, names):
         "start": v["start_actual"] or v["start_scheduled"] or v["available_at"],
         "duration": v["duration"],
         "url": f"https://www.youtube.com/watch?v={v['id']}",
+        # Holodex の分類（ゲーム名など）。画面で、同じ企画の別視点をまとめるときの手がかりにする（2026-10-25）
+        "topic": v.get("topic_id"),
     }
 
 
