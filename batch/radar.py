@@ -428,8 +428,36 @@ def kind_of(v):
     return "video"
 
 
-def entry(v, owner, names):
+# 同じ企画の別視点を画面でまとめるときの手がかり（2026-10-25）。大会の公式配信のように大勢を載せる枠のメンションや、
+# 大会全体のハッシュタグ（#にじEX_OW など）では、チームの違う枠までまとまってしまうので、チームらしいものだけを載せる
+POV_CROWD = 8        # メンションがこれより多い枠は、メンションを載せない（公式配信・実況など）
+TEAM_TAG_MAX = 8     # 題名のハッシュタグのうち、使っているチャンネルが 2〜この数のものをチーム名とみなす（#わんおぺWIN など）
+HASHTAG = re.compile(r"[#＃]([^\s#＃【】\[\]（）()|｜/／]+)")
+
+
+def hashtags(title):
+    """題名のハッシュタグ（全角・半角と大文字・小文字をそろえ、記号を除いたもの）。"""
+    text = unicodedata.normalize("NFKC", title or "").lower()
+    return {t for t in (re.sub(r"[^\w]", "", m) for m in HASHTAG.findall(text)) if t}
+
+
+def team_tags(videos):
+    """チーム名らしいハッシュタグ（2〜TEAM_TAG_MAX のチャンネルが使っているもの）。"""
+    users = {}
+    for v in videos.values():
+        for t in hashtags(v.get("title")):
+            users.setdefault(t, set()).add(v["channel_id"])
+    return frozenset(t for t, chs in users.items() if 2 <= len(chs) <= TEAM_TAG_MAX)
+
+
+def entry(v, owner, names, teams=frozenset()):
     """画面に載せる1件。owner_id は枠の主（サブチャンネルならメインのチャンネル）。"""
+    kind = kind_of(v)
+    pov = {}
+    if kind == "live":   # 別視点をまとめるのは配信だけなので、配信にだけ載せる
+        mentioned = [m for m in dict.fromkeys(v["mentions"]) if m != v["channel_id"]]
+        pov = {"mentions": mentioned if len(mentioned) <= POV_CROWD else [],
+               "tags": sorted(hashtags(v.get("title")) & teams)}
     return {
         "id": v["id"],
         "title": v["title"],
@@ -437,16 +465,17 @@ def entry(v, owner, names):
         "owner_id": owner.get(v["channel_id"], v["channel_id"]),
         "host_name": names.get(v["channel_id"]) or v["channel_name"],
         "status": v["status"],
-        "kind": kind_of(v),
+        "kind": kind,
         "start": v["start_actual"] or v["start_scheduled"] or v["available_at"],
         "duration": v["duration"],
         "url": f"https://www.youtube.com/watch?v={v['id']}",
         # Holodex の分類（ゲーム名など）。画面で、同じ企画の別視点をまとめるときの手がかりにする（2026-10-25）
         "topic": v.get("topic_id"),
+        **pov,
     }
 
 
-def appearances(videos, targets, owner, names):
+def appearances(videos, targets, owner, names, teams=frozenset()):
     """ライバーごとの他枠出演。自分（とサブチャンネル）の枠は除く。"""
     result = {cid: [] for cid in targets}
     for v in videos.values():
@@ -455,11 +484,11 @@ def appearances(videos, targets, owner, names):
         host = owner.get(v["channel_id"], v["channel_id"])
         for cid in v["mentions"]:
             if cid in result and cid != host:
-                result[cid].append(entry(v, owner, names))
+                result[cid].append(entry(v, owner, names, teams))
     return result
 
 
-def own_streams(videos, targets, owner, names):
+def own_streams(videos, targets, owner, names, teams=frozenset()):
     """ライバーごとの自枠（本人とサブチャンネルの枠）。"""
     result = {cid: [] for cid in targets}
     for v in videos.values():
@@ -467,7 +496,7 @@ def own_streams(videos, targets, owner, names):
             continue
         host = owner.get(v["channel_id"], v["channel_id"])
         if host in result:
-            result[host].append(entry(v, owner, names))
+            result[host].append(entry(v, owner, names, teams))
     return result
 
 
@@ -491,7 +520,7 @@ def write_json(path, data):
 JST = timezone(timedelta(hours=9))
 
 
-def today_items(videos, targets, owner, names, generated):
+def today_items(videos, targets, owner, names, generated, teams=frozenset()):
     """対象のライバー全員の、配信中と今日・明日（日本時間）の配信予定。cast はその枠に出る対象のライバー（枠の主は除く）。"""
     until = datetime.combine(generated.astimezone(JST).date() + timedelta(days=2), datetime.min.time(), JST)
     items = []
@@ -502,7 +531,7 @@ def today_items(videos, targets, owner, names, generated):
         start = parse_time(v["start_scheduled"] or v["available_at"])
         if host not in targets or (v["status"] == "upcoming" and start and start >= until):
             continue
-        items.append({**entry(v, owner, names),
+        items.append({**entry(v, owner, names, teams),
                       "cast": [m for m in dict.fromkeys(v["mentions"]) if m in targets and m != host]})
     return sorted(items, key=lambda a: a["start"] or "")
 
@@ -510,8 +539,9 @@ def today_items(videos, targets, owner, names, generated):
 def write_outputs(state, targets, owner, names, meta=None):
     meta = meta or {}
     generated = parse_time(state["updated_at"])
-    by_liver = appearances(state["videos"], targets, owner, names)
-    own_by_liver = own_streams(state["videos"], targets, owner, names)
+    teams = team_tags(state["videos"])
+    by_liver = appearances(state["videos"], targets, owner, names, teams)
+    own_by_liver = own_streams(state["videos"], targets, owner, names, teams)
     show_from = generated - timedelta(days=PAST_SHOW_DAYS)
     recent_from = generated - timedelta(days=RECENT_DAYS)
     recent = lambda xs: [a for a in xs if parse_time(a["start"]) >= recent_from]
@@ -540,7 +570,7 @@ def write_outputs(state, targets, owner, names, meta=None):
                       "next": upcoming[0]["start"] if upcoming else None})
     write_json(os.path.join(OUT_DIR, "radar", "today.json"), {
         "updated_at": state["updated_at"],
-        "items": today_items(state["videos"], targets, owner, names, generated),
+        "items": today_items(state["videos"], targets, owner, names, generated, teams),
     })
     write_json(os.path.join(OUT_DIR, "radar", "index.json"), {
         "updated_at": state["updated_at"],

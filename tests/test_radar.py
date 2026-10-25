@@ -480,6 +480,26 @@ class RadarTest(unittest.TestCase):
         got = {a["id"]: a.get("topic") for a in json.loads(self.read("radar", f"{SHO}.json"))["own_past"]}
         self.assertEqual(got, {"ow": "Overwatch", "none": None})
 
+    def test_pov_hints(self):
+        # 別視点をまとめる手がかり：チーム名らしいハッシュタグ（2〜8チャンネル）と、少人数のメンションだけを配信に載せる
+        self.assertEqual(radar.hashtags("【OW】本番 #にじEX_OW ＃わんおぺWIN #ちる☆ぼたWIN"), {"にじex_ow", "わんおぺwin", "ちるぼたwin"})
+        vids = {}
+        for i in range(9):   # 大会全体のタグは9チャンネルが使う → チーム名ではない
+            vids[f"e{i}"] = {"channel_id": f"ch{i}", "title": "#にじEX_OW" + (" #わんおぺWIN" if i < 3 else "")}
+        teams = radar.team_tags(vids)
+        self.assertIn("わんおぺwin", teams)
+        self.assertNotIn("にじex_ow", teams)
+        names, owner = {}, {}
+        live = {"id": "x", "title": "#にじEX_OW #わんおぺWIN", "channel_id": "ch0", "channel_name": "a", "status": "past",
+                "topic_id": "Overwatch", "start_actual": "2026-10-25T06:00:00Z", "start_scheduled": None,
+                "available_at": "2026-10-25T06:00:00Z", "duration": 3600, "has_live_info": True, "mentions": ["ch1", "ch0"]}
+        got = radar.entry(live, owner, names, teams)
+        self.assertEqual((got["mentions"], got["tags"]), (["ch1"], ["わんおぺwin"]))
+        crowd = dict(live, mentions=[f"ch{i}" for i in range(1, 10)])   # 公式配信のように大勢を載せる枠
+        self.assertEqual(radar.entry(crowd, owner, names, teams)["mentions"], [])
+        video = dict(live, start_actual=None, has_live_info=True, duration=200)   # 投稿動画には載せない
+        self.assertNotIn("mentions", radar.entry(video, owner, names, teams))
+
     def test_credit_only_names(self):
         idents = radar.build_idents(MASTER)
         f = lambda desc, title="雑談": radar.credit_only(title, desc, [SHO], idents)

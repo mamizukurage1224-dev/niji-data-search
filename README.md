@@ -20,7 +20,7 @@ ANYCOLOR株式会社およびにじさんじ公式とは関係ありません。
 ## 出力（GitHub Pages）
 
 - `radar/index.json` … 最終更新時刻と、ライバーごとの読み・グループ（`jp`：にじさんじ〔本家・旧KR・旧ID〕／`en`：NIJISANJI EN）・色（マスターの `color` 列。`#RRGGBB` のみ）・件数（他枠・自枠）・次の他枠出演
-- `radar/{channel_id}.json` … ライバー別の他枠出演（`upcoming`／`past`）と自枠（`own_upcoming`／`own_past`）。過去は直近35日分（`recent_from` 以降）。各項目の `kind` は 配信（`live`）・動画（`video`）・ショート（`short`）（開始時刻があれば配信。投稿動画は Holodex の分類 `topic_id` が shorts ならショート、ほかの分類があれば動画、分類が無いときだけ長さと題名で推定）。`topic` は Holodex の分類（ゲーム名など。画面が同じ企画の別視点をまとめるときに使う）
+- `radar/{channel_id}.json` … ライバー別の他枠出演（`upcoming`／`past`）と自枠（`own_upcoming`／`own_past`）。過去は直近35日分（`recent_from` 以降）。各項目の `kind` は 配信（`live`）・動画（`video`）・ショート（`short`）（開始時刻があれば配信。投稿動画は Holodex の分類 `topic_id` が shorts ならショート、ほかの分類があれば動画、分類が無いときだけ長さと題名で推定）。`topic` は Holodex の分類（ゲーム名など。画面が同じ企画の別視点をまとめるときに使う）。配信には、別視点をチームごとにまとめるための `mentions`（概要欄でメンションしたチャンネル。9以上ある枠は空）と `tags`（題名のハッシュタグのうち、2〜8チャンネルが使うチーム名らしいもの）も付く
 - `radar/archive/{channel_id}.json` … それより前、180日前までの過去（`past`／`own_past`）。画面で3か月・6か月などを選んだときだけ読む（取っていない古い分は、毎回1000本ずつさかのぼって取る）
 - `radar/today.json` … 対象のライバー全員の、配信中と今日・明日（日本時間）の配信予定（画面の「にじさんじ全体」）。`cast` はその枠に出る対象のライバー
 - `state.json` … 次回の差分取得に使う状態
