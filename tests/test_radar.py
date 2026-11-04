@@ -254,6 +254,29 @@ class RadarTest(unittest.TestCase):
                                       and params.get("order") == "asc"))
         self.assertLess(since, radar.now_utc() - timedelta(hours=8))   # 開始のところまでさかのぼった
 
+    def past_since(self, fake):
+        """1回実行して、過去分をどこから取ったかを返す。"""
+        calls = []
+        with mock.patch.object(holodex, "get", lambda p, params=None, retries=3: calls.append((p, params)) or fake.get(p, params)):
+            radar.main()
+        return radar.parse_time(next(params["from"] for p, params in calls if p == "/videos" and params.get("status") == "past"
+                                     and params.get("order") == "asc"))
+
+    def test_stream_never_seen_live_is_kept_after_it_ends(self):
+        # Holodex が配信中に気づかず、予定のまま8時間たってから過去に変わった枠も、差分の重なり（6時間）より前まで取り直して残す
+        self.run_batch(DatedHolodex(live=[video("late", SHO, [], status="upcoming", hours=-8)]))
+        self.assertEqual(json.loads(self.read("state.json"))["videos"]["late"]["status"], "upcoming")
+        ended = dict(video("late", SHO, [], status="past", hours=-8), duration=2 * 3600)
+        since = self.past_since(DatedHolodex(live=[], past=[ended]))
+        self.assertEqual([a["id"] for a in json.loads(self.read("radar", f"{SHO}.json"))["own_past"]], ["late"])
+        self.assertLess(since, radar.now_utc() - timedelta(hours=8))
+
+    def test_cancelled_future_stream_does_not_widen_the_past_fetch(self):
+        # 先の予定が取り消されただけなら、過去分の範囲は広げない（Holodex への呼び出しを増やさない）
+        self.run_batch(DatedHolodex(live=[video("soon", SHO, [], status="upcoming", hours=5)]))
+        since = self.past_since(DatedHolodex(live=[]))
+        self.assertGreater(since, radar.now_utc() - timedelta(hours=radar.PAST_OVERLAP_HOURS, minutes=5))
+
     def test_streams_lost_before_the_fix_are_picked_up_once(self):
         # 直す前の状態（past_fix が無い）なら、1回だけ PAST_FIX_HOURS さかのぼって、落ちていた長い配信を拾い直す
         self.run_batch(DatedHolodex())

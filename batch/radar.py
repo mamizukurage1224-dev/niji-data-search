@@ -253,10 +253,11 @@ def fetch(state, targets, idents=None):
     if last:
         # 前回は配信中で、今回 /live に無い（終わった）枠は、開始時刻のところから取り直す。過去分は開始時刻で絞るので、
         # 重なり（PAST_OVERLAP_HOURS）より長い配信は、終わったときに範囲の外になって消えていた（2026-09-27 に発見。
-        # それまでは 6時間以上の配信が、終わると一覧から落ちていた）
+        # それまでは 6時間以上の配信が、終わると一覧から落ちていた）。Holodex が配信中に気づかず、予定から過去へ直接変わる枠も同じ
+        # （2026-11-05。佐伯イッテツの枠で、開始の1時間後も予定のままだった）。先の予定が取り消された枠は、未来なので範囲を広げない
         live_ids = {v["id"] for v in live}
         ended = [parse_time(v["start_actual"] or v["available_at"]) for v in (state.get("videos") or {}).values()
-                 if v["status"] == "live" and v["src"] == "org" and v["id"] not in live_ids
+                 if v["status"] in ("live", "upcoming") and v["src"] == "org" and v["id"] not in live_ids
                  and (v["start_actual"] or v["available_at"])]
         if ended:
             since = min(since, max(min(ended) - timedelta(minutes=10), now - timedelta(hours=ENDED_LOOKBACK_HOURS)))
